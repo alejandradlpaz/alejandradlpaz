@@ -6,6 +6,7 @@
 <title>Nova Promo — Cotizador v5</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
 <style>
 :root{
   --gold:#ddb443;--gold-l:#f5e09a;--gold-d:#b8941e;
@@ -2621,73 +2622,268 @@ document.getElementById('btn-export-supplier').addEventListener('click', functio
 
   setTimeout(function(){
     try{
-      var QTY_TIERS = [500, 1000, 3000, 5000, 10000];
+      var QTY_TIERS = [500,1000,3000,5000,10000];
       var today = new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
-      var rows = [];
 
-      // Cover row
-      rows.push(['NOVAPROMO — SUPPLIER PRICE QUOTATION REQUEST — ' + today]);
-      rows.push(['Importaciones y Exportaciones Novapromo Limitada — Please fill in all yellow/empty cells']);
-      rows.push(['']); // spacer
-
-      // Header row
-      rows.push([
-        'Photo (see catalog)', 'SKU', 'Product Name', 'Technical Description', 'Size / Dimensions', 'Category',
-        'Qty Tier', 'EXW Price (USD)', 'FOB Price (USD)', 'Incoterms',
-        'Carton Size (cm)', 'Units / Carton', 'GW / Carton (kg)',
-        'Sample Cost (USD)', 'Mold / Tooling (USD)', 'Lead Time (days)', 'Comments / Notes'
-      ]);
-
-      // Products
+      // Group products by category
+      var catMap = {};
+      var catOrder = [];
       toExport.forEach(function(p){
-        var esc = p.escalas || [];
-        var caja = (p.caja_cm && p.caja_cm.length) ? p.caja_cm.join(' x ') + ' cm' : '';
-        var cat = (p.odooCategoria||'') + (p.subCategoria ? ' / ' + p.subCategoria : '');
-        var nombre = String(p.nombre || p.descripcion || '');
-        var desc = String(p.descripcion || '');
-        var size = String(p.tamaño || '');
-        var sku = String(p.sku || '');
-        var notas = String(p.notas || '');
-        var muestra = p.muestra_usd ? Number(p.muestra_usd) : '';
-        var udscaja = p.uds_por_caja ? Number(p.uds_por_caja) : '';
-        var gw = p.gw_kg_caja ? Number(p.gw_kg_caja) : '';
-
-        QTY_TIERS.forEach(function(qty, ti){
-          var ex = esc.find(function(e){ return Number(e.cantidad) === qty; });
-          var exw = ex && ex.exw_usd != null ? Number(ex.exw_usd) : '';
-          var fob = ex && ex.fob_usd != null ? Number(ex.fob_usd) : '';
-          if(ti === 0){
-            rows.push([sku, sku, nombre, desc, size, cat, qty, exw, fob, '', caja, udscaja, gw, muestra, '', '', notas]);
-          } else {
-            rows.push(['', '', '', '', '', '', qty, exw, fob, '', '', '', '', '', '', '', '']);
-          }
-        });
-        // Separator
-        rows.push(['---','---','---','---','---','---','---','---','---','---','---','---','---','---','---','---','---']);
+        var cat = p.odooCategoria || 'General';
+        if(!catMap[cat]){catMap[cat]=[];catOrder.push(cat);}
+        catMap[cat].push(p);
       });
 
-      var ws = XLSX.utils.aoa_to_sheet(rows);
+      var wb = new ExcelJS.Workbook();
+      wb.creator = 'Novapromo';
+      wb.created = new Date();
 
-      // Column widths
-      ws['!cols'] = [
-        {wch:6},{wch:13},{wch:28},{wch:36},{wch:18},{wch:18},{wch:11},
-        {wch:14},{wch:14},{wch:11},{wch:18},{wch:13},{wch:13},{wch:13},{wch:15},{wch:13},{wch:28}
-      ];
+      // Colors
+      var GOLD = 'FFDDB443';
+      var GOLD_D = 'FFB8941E';
+      var DARK = 'FF1A1A18';
+      var WHITE = 'FFFFFFFF';
+      var LIGHT = 'FFF7F7F5';
+      var INPUT = 'FFFFFBEE'; // yellow - supplier fills
+      var BORDER_C = {argb:'FFD0CDC8'};
+      var thinB = {style:'thin', color:BORDER_C};
 
-      var wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Quotation');
+      function applyBorder(cell){
+        cell.border = {top:thinB,bottom:thinB,left:thinB,right:thinB};
+      }
+      function headerCell(cell, val, bgArgb, fgArgb, sz, bold){
+        cell.value = val;
+        cell.font = {name:'Arial', bold:bold!==false, size:sz||10, color:{argb:fgArgb||WHITE}};
+        cell.fill = {type:'pattern', pattern:'solid', fgColor:{argb:bgArgb||DARK}};
+        cell.alignment = {horizontal:'center', vertical:'middle', wrapText:true};
+        applyBorder(cell);
+      }
+      function dataCell(cell, val, bgArgb, bold, sz, ha){
+        cell.value = val===undefined||val===null?'':val;
+        cell.font = {name:'Arial', bold:!!bold, size:sz||10, color:{argb:DARK}};
+        cell.fill = {type:'pattern', pattern:'solid', fgColor:{argb:bgArgb||WHITE}};
+        cell.alignment = {horizontal:ha||'left', vertical:'middle', wrapText:true};
+        applyBorder(cell);
+      }
+      function inputCell(cell, val){
+        cell.value = val===undefined||val===null?'':val;
+        cell.font = {name:'Arial', bold:false, size:10, color:{argb:DARK}};
+        cell.fill = {type:'pattern', pattern:'solid', fgColor:{argb:INPUT}};
+        cell.alignment = {horizontal:'center', vertical:'middle'};
+        cell.border = {top:thinB,bottom:thinB,left:thinB,right:thinB};
+        cell.protection = {locked:false};
+      }
 
-      var fname = 'Novapromo_SupplierQuotation_' + new Date().toISOString().split('T')[0] + '.xlsx';
-      var wbout = XLSX.write(wb, {bookType:'xlsx', type:'base64'});
-      var a = document.createElement('a');
-      a.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,' + wbout;
-      a.download = fname;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      toast('✓ Downloaded: ' + fname);
+      var sheetPromises = catOrder.map(function(cat){
+        var products = catMap[cat];
+        // Sheet name max 31 chars, no special chars
+        var sheetName = cat.replace(/[:\\/\?\*\[\]]/g,'').substring(0,31);
+        var ws = wb.addWorksheet(sheetName, {
+          pageSetup:{paperSize:9, orientation:'landscape', fitToPage:true, fitToWidth:1},
+          views:[{state:'frozen', xSplit:0, ySplit:5}]
+        });
+
+        // Column definitions
+        // A=Photo(img), B=SKU, C=Product Name, D=Description, E=Size,
+        // F=Qty, G=EXW USD, H=FOB USD, I=Incoterms,
+        // J=Carton Size, K=Units/Ctn, L=GW/Ctn, M=Sample$, N=Mold$, O=Lead Time, P=Notes
+        ws.columns = [
+          {key:'photo',  width:16},  // A - image
+          {key:'sku',    width:14},  // B
+          {key:'name',   width:30},  // C
+          {key:'desc',   width:36},  // D
+          {key:'size',   width:18},  // E
+          {key:'qty',    width:11},  // F
+          {key:'exw',    width:14},  // G
+          {key:'fob',    width:14},  // H
+          {key:'inco',   width:12},  // I
+          {key:'ctn',    width:20},  // J
+          {key:'udsctn', width:12},  // K
+          {key:'gw',     width:12},  // L
+          {key:'sample', width:13},  // M
+          {key:'mold',   width:13},  // N
+          {key:'lt',     width:13},  // O
+          {key:'notes',  width:28},  // P
+        ];
+
+        // ── ROW 1: Cover header ──
+        var r1 = ws.getRow(1);
+        r1.height = 36;
+        var c1 = ws.getCell('A1');
+        c1.value = 'NOVAPROMO  ·  SUPPLIER PRICE QUOTATION  ·  ' + cat.toUpperCase() + '  ·  ' + today;
+        c1.font = {name:'Arial', bold:true, size:13, color:{argb:GOLD}};
+        c1.fill = {type:'pattern', pattern:'solid', fgColor:{argb:DARK}};
+        c1.alignment = {horizontal:'center', vertical:'middle'};
+        ws.mergeCells('A1:P1');
+
+        // ── ROW 2: Subtitle ──
+        var r2 = ws.getRow(2);
+        r2.height = 16;
+        var c2 = ws.getCell('A2');
+        c2.value = 'Importaciones y Exportaciones Novapromo Limitada  ·  Please fill in all yellow cells  ·  Do not modify product info columns (A–E)';
+        c2.font = {name:'Arial', size:9, italic:true, color:{argb:'FF888888'}};
+        c2.fill = {type:'pattern', pattern:'solid', fgColor:{argb:DARK}};
+        c2.alignment = {horizontal:'center', vertical:'middle'};
+        ws.mergeCells('A2:P2');
+
+        // ── ROW 3: Gold separator ──
+        ws.getRow(3).height = 4;
+        ws.mergeCells('A3:P3');
+        ws.getCell('A3').fill = {type:'pattern', pattern:'solid', fgColor:{argb:GOLD}};
+
+        // ── ROW 4: Column group labels ──
+        var r4 = ws.getRow(4);
+        r4.height = 18;
+        headerCell(ws.getCell('A4'),'PRODUCT INFO',DARK,WHITE,9);
+        ws.mergeCells('A4:E4');
+        headerCell(ws.getCell('F4'),'PRICE TIERS — SUPPLIER FILLS',GOLD,DARK,9);
+        ws.mergeCells('F4:I4');
+        headerCell(ws.getCell('J4'),'PACKAGING — SUPPLIER FILLS',GOLD,DARK,9);
+        ws.mergeCells('J4:L4');
+        headerCell(ws.getCell('M4'),'COSTS — SUPPLIER FILLS',GOLD,DARK,9);
+        ws.mergeCells('M4:O4');
+        headerCell(ws.getCell('P4'),'NOTES',DARK,WHITE,9);
+
+        // ── ROW 5: Column headers ──
+        var r5 = ws.getRow(5);
+        r5.height = 32;
+        var hDefs = [
+          ['A5','Photo',DARK,WHITE],
+          ['B5','SKU',DARK,WHITE],
+          ['C5','Product Name',DARK,WHITE],
+          ['D5','Technical Description',DARK,WHITE],
+          ['E5','Size / Dims',DARK,WHITE],
+          ['F5','Qty Tier',DARK,WHITE],
+          ['G5','EXW Price\n(USD)',GOLD_D,DARK],
+          ['H5','FOB Price\n(USD)',GOLD_D,DARK],
+          ['I5','Incoterms',GOLD_D,DARK],
+          ['J5','Carton Size\n(cm L×W×H)',GOLD_D,DARK],
+          ['K5','Units /\nCarton',GOLD_D,DARK],
+          ['L5','GW /\nCarton (kg)',GOLD_D,DARK],
+          ['M5','Sample\nCost (USD)',GOLD_D,DARK],
+          ['N5','Mold / Tool\nCost (USD)',GOLD_D,DARK],
+          ['O5','Lead Time\n(days)',GOLD_D,DARK],
+          ['P5','Comments /\nNotes',DARK,WHITE],
+        ];
+        hDefs.forEach(function(h){
+          headerCell(ws.getCell(h[0]), h[1], h[2], h[3], 9, true);
+        });
+
+        var curRow = 6;
+        var imgPromises = [];
+
+        products.forEach(function(p, pi){
+          var esc = p.escalas || [];
+          var caja = (p.caja_cm&&p.caja_cm.length) ? p.caja_cm.join(' × ')+' cm' : '';
+          var nombre = String(p.nombre||p.descripcion||'');
+          var desc = String(p.descripcion||'');
+          var size = String(p.tamaño||'');
+          var sku = String(p.sku||'');
+          var notas = String(p.notas||'');
+          var muestra = p.muestra_usd ? Number(p.muestra_usd) : '';
+          var udscaja = p.uds_por_caja ? Number(p.uds_por_caja) : '';
+          var gw = p.gw_kg_caja ? Number(p.gw_kg_caja) : '';
+          var bg = pi%2===0 ? WHITE : 'FFEFEFEC';
+          var startRow = curRow;
+          var endRow = curRow + QTY_TIERS.length - 1; // 5 rows per product
+
+          // Row heights
+          for(var ri=startRow;ri<=endRow;ri++){
+            ws.getRow(ri).height = 22;
+          }
+          // First row taller for image
+          ws.getRow(startRow).height = 80;
+
+          // Merge product info cols across all tier rows
+          ['A','B','C','D','E'].forEach(function(col){
+            if(startRow < endRow) ws.mergeCells(col+startRow+':'+col+endRow);
+          });
+          // Merge packaging+cost cols
+          ['J','K','L','M','N','O','P'].forEach(function(col){
+            if(startRow < endRow) ws.mergeCells(col+startRow+':'+col+endRow);
+          });
+
+          // Product info cells
+          dataCell(ws.getCell('A'+startRow), '', bg, false, 10, 'center'); // image placeholder
+          dataCell(ws.getCell('B'+startRow), sku, bg, false, 9, 'left');
+          dataCell(ws.getCell('C'+startRow), nombre, bg, true, 11, 'left');
+          dataCell(ws.getCell('D'+startRow), desc, bg, false, 9, 'left');
+          dataCell(ws.getCell('E'+startRow), size, bg, false, 9, 'left');
+
+          // Packaging & costs (supplier fills)
+          inputCell(ws.getCell('J'+startRow), caja);
+          inputCell(ws.getCell('K'+startRow), udscaja);
+          inputCell(ws.getCell('L'+startRow), gw);
+          inputCell(ws.getCell('M'+startRow), muestra);
+          inputCell(ws.getCell('N'+startRow), '');
+          inputCell(ws.getCell('O'+startRow), '');
+          dataCell(ws.getCell('P'+startRow), notas, bg, false, 9, 'left');
+
+          // Qty tier rows
+          QTY_TIERS.forEach(function(qty, ti){
+            var r = startRow + ti;
+            var ex = esc.find(function(e){return Number(e.cantidad)===qty;});
+            var exw = ex&&ex.exw_usd!=null ? Number(ex.exw_usd) : '';
+            var fob = ex&&ex.fob_usd!=null ? Number(ex.fob_usd) : '';
+            var qBg = ti%2===0 ? 'FFEFECE8' : 'FFE8E5E0';
+            dataCell(ws.getCell('F'+r), qty, qBg, true, 10, 'center');
+            inputCell(ws.getCell('G'+r), exw);
+            inputCell(ws.getCell('H'+r), fob);
+            inputCell(ws.getCell('I'+r), '');
+          });
+
+          // Image
+          var fotos = p.fotos||[p.foto||''];
+          var fotoSrc = fotos[0]||fotos[1]||fotos[2]||'';
+          if(fotoSrc && fotoSrc.indexOf('data:')===0){
+            var ext = (fotoSrc.match(/data:image\/(\w+)/)||['','png'])[1];
+            if(ext==='jpg') ext='jpeg';
+            var b64 = fotoSrc.split(',')[1];
+            (function(b64data, extension, sRow){
+              imgPromises.push(
+                Promise.resolve().then(function(){
+                  try{
+                    var imgId = wb.addImage({base64:b64data, extension:extension});
+                    ws.addImage(imgId, {
+                      tl:{col:0, row:sRow-1},
+                      br:{col:1, row:sRow},
+                      editAs:'oneCell'
+                    });
+                  }catch(e){}
+                })
+              );
+            })(b64, ext, startRow);
+          }
+
+          curRow = endRow + 1;
+
+          // Gold separator between products
+          var sepRow = ws.getRow(curRow);
+          sepRow.height = 3;
+          ws.mergeCells('A'+curRow+':P'+curRow);
+          ws.getCell('A'+curRow).fill = {type:'pattern',pattern:'solid',fgColor:{argb:GOLD}};
+          curRow++;
+        });
+
+        return Promise.all(imgPromises);
+      });
+
+      Promise.all(sheetPromises).then(function(){
+        wb.xlsx.writeBuffer().then(function(buffer){
+          var b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(buffer)));
+          var fname = 'Novapromo_SupplierQuotation_'+new Date().toISOString().split('T')[0]+'.xlsx';
+          var a = document.createElement('a');
+          a.href = 'data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,'+b64;
+          a.download = fname;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          toast('✓ Downloaded: '+fname+' ('+catOrder.length+' tabs, '+toExport.length+' products)');
+        }).catch(function(err){toast('❌ '+err.message);console.error(err);});
+      }).catch(function(err){toast('❌ '+err.message);console.error(err);});
+
     } catch(err){
-      toast('❌ Error: ' + err.message);
+      toast('❌ Error: '+err.message);
       console.error(err);
     }
   }, 150);
