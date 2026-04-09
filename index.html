@@ -329,6 +329,7 @@ html,body{height:100%;background:var(--bg);color:var(--tx);font-family:var(--f);
   <div class="sp"></div>
   <button class="tbtn" id="btn-load">📂 Cargar</button>
   <span id="save-indicator" style="font-size:11px;color:var(--tx-l)"></span><button class="tbtn" id="btn-save">💾 Guardar</button>
+  <button class="tbtn primary" id="btn-pdf">📄 Generar PDF</button>
 </div>
 <div id="tabs">
   <button class="tab-btn active" data-tab="cot">🧾 Cotizador</button>
@@ -2257,6 +2258,143 @@ document.getElementById('btn-clear').addEventListener('click',function(){if(!lin
   });;
 
 // ═══ PDF + SAVE TO HISTORY ═══
+// ═══ PDF COTIZACIÓN ═══
+function buildRows(){
+  var ids=[];lines.forEach(function(l){if(!ids.includes(l.id))ids.push(l.id);});
+  var rows=[],neto=0;
+  ids.forEach(function(id){
+    var p=catalog.find(function(x){return x.id===id;});if(!p)return;
+    var ls=lines.filter(function(l){return l.id===id;});
+    var qtys=[];ls.forEach(function(l){if(!qtys.includes(l.qty))qtys.push(l.qty);});
+    var firstInProd=true;
+    qtys.forEach(function(qty){
+      var qls=ls.filter(function(l){return l.qty===qty;});
+      qls.forEach(function(l){
+        var e=bestE(p,l.qty),c,days,pv,tl;
+        if(l.type==='lcl'){
+          c=calcLCL(p,e,l.qty,l.mg,l.overrides);
+          var al=qls.find(function(x){return x.type==='air';});
+          if(al&&p.peso_gramos){var ac=calcAir(p,bestE(p,al.qty),al.qty,al.mg,al.overrides);if(ac&&ac.pf<c.pf)return;}
+          days=getDays(p,'lcl');tl='Marítimo LCL';pv=(l.overrides&&l.overrides.price_fixed>0)?l.overrides.price_fixed:c.pf;
+        } else {
+          if(!p.peso_gramos)return;c=calcAir(p,e,l.qty,l.mg,l.overrides);if(!c)return;days=getDays(p,'air');tl='Aéreo';pv=(l.overrides&&l.overrides.price_fixed>0)?l.overrides.price_fixed:c.pf;
+        }
+        neto+=pv*l.qty;
+        var tiempoKey=p.tipoTiempo&&times[p.tipoTiempo]?p.tipoTiempo:null;
+        var sampleD=tiempoKey?((times[tiempoKey].sample_days||13)+3):16;
+        rows.push({prod:p,line:l,c:c,days:days,tl:tl,pv:pv,sampleD:sampleD,firstInProd:firstInProd});
+        firstInProd=false;
+      });
+    });
+  });
+  return{rows:rows,neto:neto};
+}
+function buildPDFContent(cl,qd,qn,tcVal,rows,neto){
+  var iv=Math.round(neto*tar.iva/100),tot=neto+iv;
+  var prodGroups={},prodOrder=[];
+  rows.forEach(function(r){
+    if(!prodGroups[r.prod.id]){prodGroups[r.prod.id]=[];prodOrder.push(r.prod.id);}
+    prodGroups[r.prod.id].push(r);
+  });
+  var tbody='';
+  prodOrder.forEach(function(pid){
+    var grp=prodGroups[pid],span=grp.length;
+    var fotoSrc=getProdFoto(grp[0].prod);
+    var prod=grp[0].prod;
+    var imgTag=fotoSrc?'<img src="'+fotoSrc+'" style="width:70px;height:70px;object-fit:cover;border-radius:5px;display:block;margin:0 auto">':'';
+    var skuTag=prod.sku?'<div style="font-size:9px;font-family:monospace;color:#9b9b98;margin-top:4px;text-align:center">'+prod.sku+'</div>':'';
+    var nameCell='<td rowspan="'+span+'" style="vertical-align:middle;text-align:center;width:70px;padding:4px;border-right:1px solid #e8e8e8">'+imgTag+skuTag+'</td>'+
+      '<td rowspan="'+span+'" style="vertical-align:middle;padding:8px 10px;border-right:1px solid #e8e8e8;width:160px">'+
+      '<div style="font-weight:700;font-size:12px;color:#1a1a18;margin-bottom:3px">'+(prod.nombre||prod.descripcion||'')+'</div>'+
+      (prod.descripcion?'<div style="font-size:10px;color:#666;line-height:1.4">'+prod.descripcion+'</div>':'')+
+      (prod.tamaño?'<div style="font-size:10px;color:#999;margin-top:2px">📐 '+prod.tamaño+'</div>':'')+
+      '</td>';
+    grp.forEach(function(r,i){
+      tbody+='<tr'+(i===0?' style="border-top:2px solid #e0ddd8"':'')+'>';
+      if(i===0)tbody+=nameCell;
+      tbody+='<td style="text-align:right;font-weight:700;padding:6px 8px">'+clp(r.pv)+
+        (r.line.overrides&&r.line.overrides.nota?'<div style="font-size:9px;color:#2a62b0;font-style:italic;margin-top:2px">📝 '+r.line.overrides.nota+'</div>':'')+
+        '</td>'+
+        '<td style="text-align:right;padding:6px 8px">'+r.line.qty.toLocaleString('es-CL')+'</td>'+
+        '<td style="text-align:right;font-weight:700;padding:6px 8px">'+clp(r.pv*r.line.qty)+'</td>'+
+        '<td style="text-align:center;padding:6px 4px">'+(r.sampleD||16)+' días</td>'+
+        '<td style="text-align:center;padding:6px 4px">'+r.days+' días</td>'+
+        '<td style="text-align:center;padding:6px 4px">'+r.tl+'</td>'+
+        '<td style="text-align:center;padding:6px 4px">'+addD(qd,r.days)+'</td>'+
+        '</tr>';
+    });
+  });
+  return '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">'+
+    '<title>Cotización '+qn+'</title>'+
+    '<style>@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700&display=swap");'+
+    'body{font-family:"DM Sans",Arial,sans-serif;font-size:11px;color:#333;margin:0;padding:20px}'+
+    '.top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px}'+
+    '.meta{font-size:11px;color:#555;line-height:1.7;text-align:right}'+
+    'table{width:100%;border-collapse:collapse;margin:12px 0;font-size:11px}'+
+    'thead tr{background:#ddb443;color:#fff}'+
+    'thead th{padding:7px 5px;text-align:left;font-size:10px;font-weight:700}'+
+    'tbody tr:nth-child(even) td:not([rowspan]){background:#fafafa}'+
+    'tbody td{padding:6px 5px;border-bottom:1px solid #eee;vertical-align:middle}'+
+    '.tot-wrap{display:flex;justify-content:flex-end}'+
+    '.tot-tbl{border-collapse:collapse;min-width:260px}'+
+    '.tot-tbl td{padding:4px 10px;font-size:12px}'+
+    '.tot-tbl .lbl{color:#555;text-align:right}'+
+    '.tot-tbl .val{font-weight:700;text-align:right;font-family:monospace}'+
+    '.tot-tbl .grand{background:#ddb443;color:#fff;font-size:13px;font-weight:700}'+
+    '.cond{display:grid;grid-template-columns:1fr 1fr;border:1px solid #ddb443;border-radius:4px;overflow:hidden;margin-top:16px;font-size:10px}'+
+    '.cb{padding:8px 12px}.cb.y{background:#fff8dc}'+
+    '.cb h4{font-size:10px;font-weight:700;text-transform:uppercase;color:#b8941e;margin-bottom:4px}'+
+    '.cb p{margin-bottom:2px;color:#555}'+
+    '.disc{font-size:10px;color:#444;margin-top:12px;padding:10px 14px;background:#fff8dc;border:1px solid #ddb443;border-left:4px solid #ddb443;border-radius:4px;line-height:1.6;font-weight:600}'+
+    '@media print{body{padding:10px}}</style></head><body>'+
+    '<div class="top"><div>'+
+    '<svg viewBox="0 0 485.64 160.86" height="40" xmlns="http://www.w3.org/2000/svg">'+SVG_STR+'</svg>'+
+    '<p style="font-size:10px;color:#666;margin-top:4px">De acuerdo a lo solicitado, enviamos propuesta de precios según cantidad y elemento a cotizar.</p>'+
+    '</div><div class="meta"><strong>Cliente:</strong> '+cl+'<br><strong>Fecha:</strong> '+(qd||new Date().toLocaleDateString('es-CL'))+'</div></div>'+
+    '<table><thead><tr>'+
+    '<th style="width:70px">Foto</th><th style="width:160px">Producto / Descripción</th>'+
+    '<th style="text-align:right;white-space:nowrap">Precio Unit.<br>(CLP) Neto</th>'+
+    '<th style="text-align:right;white-space:nowrap">Unidades</th><th style="text-align:right;white-space:nowrap">Total Neto</th>'+
+    '<th style="text-align:center;white-space:nowrap">Desarrollo Muestra</th>'+
+    '<th style="text-align:center;white-space:nowrap">Plazo Entrega</th>'+
+    '<th style="text-align:center;white-space:nowrap">Embarque</th>'+
+    '<th style="text-align:center;white-space:nowrap">Fecha Tentativa*</th>'+
+    '</tr></thead><tbody>'+tbody+'</tbody></table>'+
+    '<div class="tot-wrap"><table class="tot-tbl">'+
+    '<tr><td class="lbl">TOTAL NETO</td><td class="val">'+clp(Math.round(neto))+'</td></tr>'+
+    '<tr><td class="lbl">IVA</td><td class="val">'+clp(iv)+'</td></tr>'+
+    '<tr class="grand"><td class="lbl" style="color:#fff">TOTAL BRUTO</td><td class="val">'+clp(tot)+'</td></tr>'+
+    '</table></div>'+
+    '<div class="disc">*Precio estimado a reconfirmar según diseño final. Las fechas indicadas son estimadas y tentativas. <strong>Esta cotización tiene una validez de 7 días corridos desde su fecha de emisión.</strong></div>'+
+    '<div class="cond">'+
+    '<div class="cb y"><h4>Condiciones de Venta</h4><p>Forma Pago: 30 días.</p><p>Despacho: Gratis dentro de Santiago. Bodega Camino El Cerro 290. Bodega J3</p></div>'+
+    '<div class="cb"><h4>Información Empresa</h4><p>Teléfono: 22 9935829</p><p>Dirección: Camino Turístico 11.297. Lo Barnechea</p><p>Contacto: bprieto@nova-group.cl / avargas@nova-group.cl</p></div>'+
+    '<div class="cb y"><h4>Datos Orden de Compra</h4><p>Razón Social: Importaciones y Exportaciones Novapromo Limitada</p><p>Rut: 76.198.987-1 | Tel: 56 9 5607 5128</p></div>'+
+    '<div class="cb"></div></div>'+
+    '<scr'+'ipt>window.onload=function(){window.print();}</'+'scr'+'ipt></body></html>';
+}
+document.getElementById('btn-pdf').addEventListener('click',function(){
+  if(!lines.length){toast('Agrega productos primero');return;}
+  var cl=document.getElementById('qt-cl').value||'Cliente';
+  var qd=document.getElementById('qt-dt').value;
+  var qn=document.getElementById('qt-num').value;
+  var tcVal=document.getElementById('qt-tc').value;
+  var built=buildRows();
+  if(!built.rows.length){toast('Sin líneas visibles para el PDF');return;}
+  var html=buildPDFContent(cl,qd,qn,tcVal,built.rows,built.neto);
+  var iv=Math.round(built.neto*tar.iva/100);
+  var nextNum=nextQuoteNum();
+  document.getElementById('qt-num').value=nextNum;
+  var entry={id:Date.now(),num:qn,cliente:cl,fecha:qd||new Date().toLocaleDateString('es-CL'),
+    total:built.neto+iv,
+    prods:lines.map(function(l){var p=catalog.find(function(x){return x.id===l.id;});return p?p.descripcion:'?';}).filter(function(v,i,a){return a.indexOf(v)===i;}),
+    lines:JSON.parse(JSON.stringify(lines)),cl:cl,html:html};
+  historial.unshift(entry);
+  sched();
+  var w=window.open('','_blank');w.document.write(html);w.document.close();
+  toast('✓ PDF generado y guardado en Historial');
+});
+
 // ═══ HISTORIAL ═══
 function renderHist(){
   var list=document.getElementById('hist-list');list.innerHTML='';
