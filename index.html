@@ -397,9 +397,6 @@ html,body{height:100%;background:var(--bg);color:var(--tx);font-family:var(--f);
       <button class="tbtn" id="btn-toggle-sel">☑ Seleccionar</button>
       <button class="tbtn" id="btn-export-odoo">📤 Exportar Odoo</button>
       <button class="tbtn primary" id="btn-export-supplier" style="background:var(--green);border-color:var(--green)">📊 Supplier Quotation</button>
-      <span id="china-count-wrap" style="display:none;font-size:12px;color:var(--gold-d);font-weight:600;background:var(--gold-bg2);padding:4px 10px;border-radius:var(--r);border:1px solid var(--gold-l)">🇨🇳 <span id="china-count">0</span> para ficha</span>
-      <button class="tbtn" id="btn-toggle-china" style="border-color:var(--gold);color:var(--gold-d)">🇨🇳 Seleccionar para ficha</button>
-      <button class="tbtn" id="btn-china-pdf" style="background:var(--gold);color:#fff;border-color:var(--gold);font-weight:700">🇨🇳 Generar Fichas</button>
       <button class="tbtn" id="btn-new-prod">+ Nuevo Producto</button>
     </div>
     <div id="catbody">
@@ -947,8 +944,8 @@ function addLine(id,scaleIdxs){
   var mg=tar.margin_default;
   idxsToUse.forEach(function(idx){
     var e=esc[idx]||esc[0]||{cantidad:500};
-    lines.push({id:id,type:'lcl',qty:e.cantidad,mg:mg,overrides:{}});
-    if(p.peso_gramos)lines.push({id:id,type:'air',qty:e.cantidad,mg:mg,overrides:{}});
+    lines.push({id:id,type:'lcl',qty:e.cantidad,mg:mg,overrides:{nota:'Incluye 1 diseño'}});
+    if(p.peso_gramos)lines.push({id:id,type:'air',qty:e.cantidad,mg:mg,overrides:{nota:'Incluye 1 diseño'}});
   });
   toast('✓ '+p.descripcion.substring(0,28));
   renderQ();
@@ -1055,6 +1052,12 @@ function showDet(id,tp,qty){
   var curPF=(ov.price_fixed)||0;
   var curNote=(ov.nota)||'';
   var curMuMult=(ov.muestra_mult!=null)?ov.muestra_mult:1;
+  function autoNota(mult){return mult>1?'Incluye '+mult+' diseños':'Incluye 1 diseño';}
+  function isAutoNota(n){return !n||/^Incluye \d+ dise/.test(n);}
+  // Si la nota está vacía o es automática, generar la automática
+  if(isAutoNota(curNote))curNote=autoNota(curMuMult);
+  // Persistir la nota auto en overrides para que aparezca en PDF
+  if(!l.overrides.nota||isAutoNota(l.overrides.nota))l.overrides.nota=curNote;
   function build(){
     var ovr={tc:curTC,muestra_usd:curMu*curMuMult,cbm_override:curCBM,price_fixed:curPF};
     var c=(tp==='lcl')?calcLCL(p,e,l.qty,l.mg,ovr):calcAir(p,e,l.qty,l.mg,ovr);
@@ -1141,7 +1144,10 @@ function showDet(id,tp,qty){
       var pfEl=document.getElementById('ov-pf');
       curPF=pfEl?parseFloat(pfEl.value)||0:0;
       var notaEl=document.getElementById('ov-nota');
-      curNote=notaEl?notaEl.value.trim():'';
+      var notaVal=notaEl?notaEl.value.trim():'';
+      // Si la nota es automática o vacía, actualizar según nuevo muMult
+      if(isAutoNota(notaVal))curNote=autoNota(curMuMult);
+      else curNote=notaVal;
       l.overrides={tc:curTC,muestra_usd:curMu,muestra_mult:curMuMult,cbm_override:curCBM,price_fixed:curPF,nota:curNote};
       document.getElementById('modal-bd').innerHTML=build();
       attachRecalc();renderQ();toast('↻ Recalculado');
@@ -1496,7 +1502,9 @@ function showEditProd(id){
     }
   });
   document.getElementById('ep-add-cot').addEventListener('click',function(){
-    showScalePicker(editProdId);
+    document.getElementById('modal-ov').classList.remove('on');
+    hideModalNav();
+    setTimeout(function(){showScalePicker(editProdId);},80);
   });
   // Paste image from clipboard — fotos producto O cotización proveedor
   document.getElementById('modal-bd').onpaste = function(e){
@@ -2199,22 +2207,6 @@ function showSavedIndicator(){
 function sched(){clearTimeout(autoT);autoT=setTimeout(function(){try{localStorage.setItem('np_v5',JSON.stringify(getState()));showSavedIndicator();}catch(x){}},10000);}
 document.getElementById('btn-clear').addEventListener('click',function(){if(!lines.length)return;if(confirm('¿Limpiar cotización?')){lines=[];renderQ();}});
 // catsearch removed
-  document.getElementById('btn-toggle-china').addEventListener('click',function(){
-    chinaSelectMode=!chinaSelectMode;
-    chinaSelected.clear();
-    updateChinaCount();
-    this.textContent=chinaSelectMode?'✕ Cancelar selección':'🇨🇳 Seleccionar para ficha';
-    this.style.background=chinaSelectMode?'var(--gold-bg2)':'';
-    this.style.fontWeight=chinaSelectMode?'700':'';
-    // exit edit-select mode if active
-    if(chinaSelectMode&&catSelectMode){
-      catSelectMode=false;catSelected.clear();
-      document.getElementById('btn-toggle-sel').textContent='☑ Seleccionar';
-      document.getElementById('btn-toggle-sel').style.background='';
-      updateSelCount();
-    }
-    renderCat();
-  });
   document.getElementById('btn-toggle-sel').addEventListener('click',function(){
     catSelectMode=!catSelectMode;
     catSelected.clear();
@@ -2439,28 +2431,6 @@ function renderHist(){
 }
 
 // ═══ FICHA CHINA — ASYNC AI ═══
-document.getElementById('btn-china-pdf').addEventListener('click', function() {
-  var toExport;
-  if(chinaSelected.size>0){
-    toExport=catalog.filter(function(p){return chinaSelected.has(p.id);});
-  } else if(catSelectMode&&catSelected.size>0){
-    toExport=catalog.filter(function(p){return catSelected.has(p.id);});
-  } else if(catCSel.mode!=='all'){
-    toExport=catalog.filter(function(p){
-      if(catCSel.mode==='cat')return p.odooCategoria===catCSel.cat;
-      if(catCSel.mode==='sub')return p.odooCategoria===catCSel.cat&&p.subCategoria===catCSel.sub;
-      return true;
-    });
-  } else {
-    toExport=catalog.slice();
-  }
-  if(!toExport.length){toast('No hay productos para exportar');return;}
-  if(toExport.length>30){
-    if(!confirm('Hay '+toExport.length+' productos. La generación con IA puede tomar ~'+Math.ceil(toExport.length*3/60)+' minutos. ¿Continuar?'))return;
-  }
-  generateChinaPDFAsync(toExport);
-});
-
 async function generateChinaPDFAsync(prods){
   var ov=document.getElementById('china-prog-ov');
   var bar=document.getElementById('china-prog-bar');
