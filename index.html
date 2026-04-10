@@ -667,7 +667,30 @@ document.querySelectorAll('.tab-btn').forEach(function(b) {
 
 // ═══ HELPERS ═══
 function clp(n){return n==null||isNaN(n)?'-':'$'+Math.round(n).toLocaleString('es-CL');}
-function addD(ds,d){var x=ds?new Date(ds+'T12:00:00'):new Date();x.setDate(x.getDate()+(d||0));return x.toLocaleDateString('es-CL',{day:'2-digit',month:'2-digit',year:'numeric'});}
+// ═══ CNY BLOCK ═══
+var CNY_BLOCKS=[
+  {start:new Date('2026-02-01T00:00:00'),end:new Date('2026-02-28T23:59:59'),resume:new Date('2026-03-01T12:00:00')},
+  {start:new Date('2027-01-23T00:00:00'),end:new Date('2027-02-23T23:59:59'),resume:new Date('2027-02-24T12:00:00')},
+  {start:new Date('2028-02-10T00:00:00'),end:new Date('2028-03-10T23:59:59'),resume:new Date('2028-03-11T12:00:00')}
+];
+function cnyAdjust(dt){
+  for(var i=0;i<CNY_BLOCKS.length;i++){
+    var b=CNY_BLOCKS[i];
+    if(dt>=b.start&&dt<=b.end){return new Date(b.resume.getTime());}
+  }
+  return dt;
+}
+function addD(ds,d){
+  var x=ds?new Date(ds+'T12:00:00'):new Date();
+  x.setDate(x.getDate()+(d||0));
+  x=cnyAdjust(x);
+  return x.toLocaleDateString('es-CL',{day:'2-digit',month:'2-digit',year:'numeric'});
+}
+function addDDate(ds,d){
+  var x=ds?new Date(ds+'T12:00:00'):new Date();
+  x.setDate(x.getDate()+(d||0));
+  return cnyAdjust(x);
+}
 function toast(m){var t=document.getElementById('toast');t.textContent=m;t.classList.add('on');setTimeout(function(){t.classList.remove('on');},3000);}
 function openLightbox(src){if(!src)return;document.getElementById('lightbox-img').src=src;document.getElementById('lightbox').classList.add('on');}
 document.getElementById('lightbox').addEventListener('click',function(){this.classList.remove('on');});
@@ -992,7 +1015,11 @@ function renderQ(){
           c=calcAir(p,e,l.qty,l.mg,l.overrides);if(!c)return;days=getDays(p,'air');pv=c.pf;
         }
         if(!hidden){var usePF=(l.overrides&&l.overrides.price_fixed&&l.overrides.price_fixed>0)?l.overrides.price_fixed:pv;neto+=usePF*l.qty;pv=usePF;}
-        var de=addD(qd,days);
+        var deRaw=qd?new Date(qd+'T12:00:00'):new Date();deRaw.setDate(deRaw.getDate()+(days||0));
+        var deAdj=cnyAdjust(deRaw);
+        var deCNY=deAdj>deRaw;
+        var de=deAdj.toLocaleDateString('es-CL',{day:'2-digit',month:'2-digit',year:'numeric'});
+        var deTxt='📅 '+de+(deCNY?'<span title="Fecha pospuesta por CNY" style="font-size:9px;color:var(--warn);margin-left:3px">🇨🇳+</span>':'');
         var uid=id+'_'+l.type+'_'+qty;
         lh+='<div class="ql '+l.type+(hidden?' hidden':'')+'">'+
           '<span class="qlt '+l.type+'">'+(l.type==='lcl'?'LCL':'AÉREO')+'</span>'+
@@ -1001,7 +1028,7 @@ function renderQ(){
           '<div class="ql-mw"><span class="ql-ml">Margen %</span>'+
           '<input class="qin" type="number" value="'+l.mg+'" min="0" max="100" data-id="'+id+'" data-tp="'+l.type+'" data-qty="'+qty+'" data-f="mg"></div>'+
           '<div class="ql-days">⏱ '+days+'d</div>'+
-          '<div class="ql-date">📅 '+de+'</div>'+
+          '<div class="ql-date">'+deTxt+'</div>'+
           '<div class="ql-pr"><span class="ql-unit">'+clp(pv)+'</span>'+
           '<span class="ql-sub">'+clp(pv*l.qty)+'</span></div>'+
           '<button class="ql-det" data-id="'+id+'" data-tp="'+l.type+'" data-qty="'+qty+'">Ver costeo</button>'+
@@ -2304,6 +2331,10 @@ function buildPDFContent(cl,qd,qn,tcVal,rows,neto){
     grp.forEach(function(r,i){
       tbody+='<tr'+(i===0?' style="border-top:2px solid #e0ddd8"':'')+'>';
       if(i===0)tbody+=nameCell;
+      var pdfRaw=qd?new Date(qd+'T12:00:00'):new Date();pdfRaw.setDate(pdfRaw.getDate()+(r.days||0));
+      var pdfAdj=cnyAdjust(pdfRaw);
+      var pdfCNY=pdfAdj.getTime()>pdfRaw.getTime();
+      var pdfDate=pdfAdj.toLocaleDateString('es-CL',{day:'2-digit',month:'2-digit',year:'numeric'});
       tbody+='<td style="text-align:right;font-weight:700;padding:6px 8px">'+clp(r.pv)+
         (r.line.overrides&&r.line.overrides.nota?'<div style="font-size:9px;color:#2a62b0;font-style:italic;margin-top:2px">📝 '+r.line.overrides.nota+'</div>':'')+
         '</td>'+
@@ -2312,7 +2343,7 @@ function buildPDFContent(cl,qd,qn,tcVal,rows,neto){
         '<td style="text-align:center;padding:6px 4px">'+(r.sampleD||16)+' días</td>'+
         '<td style="text-align:center;padding:6px 4px">'+r.days+' días</td>'+
         '<td style="text-align:center;padding:6px 4px">'+r.tl+'</td>'+
-        '<td style="text-align:center;padding:6px 4px">'+addD(qd,r.days)+'</td>'+
+        '<td style="text-align:center;padding:6px 4px">'+pdfDate+(pdfCNY?'<div style="font-size:8px;color:#c07010;font-style:italic">🇨🇳 Ajustado CNY</div>':'')+'</td>'+
         '</tr>';
     });
   });
