@@ -329,7 +329,6 @@ html,body{height:100%;background:var(--bg);color:var(--tx);font-family:var(--f);
   <div class="sp"></div>
   <button class="tbtn" id="btn-load">📂 Cargar</button>
   <span id="save-indicator" style="font-size:11px;color:var(--tx-l)"></span><button class="tbtn" id="btn-save">💾 Guardar</button>
-  <button class="tbtn primary" id="btn-pdf">📄 Generar PDF</button>
 </div>
 <div id="tabs">
   <button class="tab-btn active" data-tab="cot">🧾 Cotizador</button>
@@ -371,6 +370,7 @@ html,body{height:100%;background:var(--bg);color:var(--tx);font-family:var(--f);
         <label>TC:</label>
         <input type="number" id="qt-tc" class="qi" style="width:75px">
         <div class="sp"></div>
+        <button class="tbtn primary" id="btn-pdf" style="margin-left:4px">📄 Generar PDF</button>
         <button class="dbtn" id="btn-clear">🗑 Limpiar</button>
       </div>
       <div id="qbody">
@@ -629,6 +629,7 @@ var pedOrders = {}; // {[orderId]: Order}
 var pedSelOrder = null; // orderId seleccionado
 var pedSelProd = 0;    // índice de producto seleccionado dentro de la orden
 var pmProdCount = 0;
+var pedEditingOid = null; // null = nueva orden, string = editando orden existente
 // Cargar inmediatamente
 try{ var _po=localStorage.getItem(PED_KEY); if(_po) pedOrders=JSON.parse(_po); }catch(e){}
 
@@ -2249,12 +2250,14 @@ function nextQuoteNum(){
 }
 function getState(){
   return{version:'v5',catalog:catalog,times:times,tar:tar,lines:lines,historial:historial,
+    pedidos:pedOrders,
     cl:document.getElementById('qt-cl').value,dt:document.getElementById('qt-dt').value,
     num:document.getElementById('qt-num').value,tc:document.getElementById('qt-tc').value};
 }
 function loadSt(s){
   if(s.catalog)catalog=s.catalog;if(s.times)times=s.times;if(s.tar)tar=s.tar;
   if(s.lines)lines=s.lines;if(s.historial)historial=s.historial;
+  if(s.pedidos){pedOrders=s.pedidos;try{localStorage.setItem(PED_KEY,JSON.stringify(pedOrders));}catch(x){}}
   if(s.cl)document.getElementById('qt-cl').value=s.cl;
   if(s.dt)document.getElementById('qt-dt').value=s.dt;
   if(s.num)document.getElementById('qt-num').value=s.num;
@@ -2378,7 +2381,7 @@ function buildPDFContent(cl,qd,qn,tcVal,rows,neto){
     var nameCell='<td rowspan="'+span+'" style="vertical-align:middle;text-align:center;width:70px;padding:4px;border-right:1px solid #e8e8e8">'+imgTag+skuTag+'</td>'+
       '<td rowspan="'+span+'" style="vertical-align:middle;padding:8px 10px;border-right:1px solid #e8e8e8;width:160px">'+
       '<div style="font-weight:700;font-size:12px;color:#1a1a18;margin-bottom:3px">'+(prod.nombre||prod.descripcion||'')+'</div>'+
-      (prod.descripcion?'<div style="font-size:10px;color:#666;line-height:1.4">'+prod.descripcion+'</div>':'')+
+      ((prod.nombre||prod.descripcion)?'<div style="font-size:10px;color:#666;line-height:1.4">'+(prod.nombre||prod.descripcion)+'</div>':'')+
       (prod.tamaño?'<div style="font-size:10px;color:#999;margin-top:2px">📐 '+prod.tamaño+'</div>':'')+
       '</td>';
     grp.forEach(function(r,i){
@@ -3007,9 +3010,30 @@ try{
 // [BASE_MILESTONES moved to top]
 
 function pedMilestones(prod){
-  return BASE_MILESTONES.filter(function(m){
-    return m.always || (m.req_muestra && prod.req_muestra);
+  var ms=[];
+  BASE_MILESTONES.forEach(function(m){
+    if(m.always){ ms.push(m); return; }
+    if(!m.req_muestra || !prod.req_muestra) return;
+    if(m.key==='ini_muestra'||m.key==='apr_muestra'){
+      var muestras=prod.muestras||[{tipo_aprobacion:prod.tipo_aprobacion||'foto_video',rechazada:false}];
+      muestras.forEach(function(mu,i){
+        var n=i+1;
+        var suffix=muestras.length>1?' M'+n:'';
+        if(m.key==='ini_muestra'){
+          ms.push({key:'ini_muestra_'+n, label:'Inicio Muestra'+suffix, icon:'🧪', isMuestra:true, mIdx:i});
+        } else {
+          ms.push({key:'apr_muestra_'+n, label:(mu.rechazada?'❌ Rechazada':'Aprobación Muestra')+suffix,
+            icon:mu.rechazada?'❌':'✔️', isMuestra:true, mIdx:i, isApr:true});
+          // If last muestra is rejected and arte definitivo date exists, add that milestone
+          var isLastRej=mu.rechazada && i===muestras.length-1;
+          if(isLastRej && prod.milestones_real && prod.milestones_real['envio_arte_def']){
+            ms.push({key:'envio_arte_def', label:'Arte Definitivo', icon:'🎨', isMuestra:true});
+          }
+        }
+      });
+    }
   });
+  return ms;
 }
 
 // ── PERSISTENCE ──
@@ -3055,40 +3079,115 @@ function pedCalcTL(prod, orderConfDate){
 
   var tkey = prod.tipoTiempo;
   var t = (tkey && times[tkey]) ? times[tkey] : {sample_days:10, bulk_days:25};
-  var sampleDays = t.sample_days||10;
-  var bulkDays = t.bulk_days||25;
-  var transit = prod.mode==='air' ? 15 : 45;
-  var physicalExtra = (prod.req_muestra && prod.tipo_aprobacion==='fisica') ? 12 : 0;
+  var sampleDays = prod.dias_muestra || t.sample_days || 10;
+  var bulkDays   = prod.dias_produccion || t.bulk_days || 25;
+  var transit = prod.mode==='air' ? 12 : 45;
+  var mr = prod.milestones_real || {};
 
-  var tl = {confirmacion: d0};
-  tl.envio_aw       = pSkipCNY(pAddDays(d0, 2));
-  tl.vb_mockup      = pSkipCNY(pAddWork(tl.envio_aw, 5));
+  // anchor: use real date if exists, else use calculated
+  function anch(key, calc){ return (mr[key] ? pDate(mr[key]) : null) || calc; }
+
+  var tl = {};
+  tl.confirmacion   = anch('confirmacion', d0);
+  tl.envio_aw       = anch('envio_aw',       pSkipCNY(pAddDays(tl.confirmacion, 2)));
+  tl.vb_mockup      = anch('vb_mockup',      pSkipCNY(pAddWork(tl.envio_aw, 5)));
 
   if(prod.req_muestra){
-    tl.ini_muestra  = pSkipCNY(pAddDays(tl.vb_mockup, 2));
-    tl.apr_muestra  = pSkipCNY(pAddWork(tl.ini_muestra, sampleDays + physicalExtra));
-    tl.ini_produccion = pSkipCNY(pAddDays(tl.apr_muestra, 2));
+    var muestras=prod.muestras||[{tipo_aprobacion:prod.tipo_aprobacion||'foto_video',rechazada:false}];
+    var prevDate=tl.vb_mockup;
+    muestras.forEach(function(mu,i){
+      var n=i+1;
+      var extra=(mu.tipo_aprobacion==='fisica')?12:0;
+      var iniKey='ini_muestra_'+n, aprKey='apr_muestra_'+n;
+      tl[iniKey] = anch(iniKey, pSkipCNY(pAddDays(prevDate, 2)));
+      tl[aprKey] = anch(aprKey, pSkipCNY(pAddWork(tl[iniKey], sampleDays + extra)));
+      prevDate = tl[aprKey];
+    });
+    tl.ini_produccion = anch('ini_produccion', pSkipCNY(pAddDays(prevDate, 2)));
+    tl.ini_muestra = tl['ini_muestra_1'];
+    tl.apr_muestra = tl['apr_muestra_'+muestras.length];
   } else {
-    tl.ini_produccion = pSkipCNY(pAddDays(tl.vb_mockup, 3));
+    tl.ini_produccion = anch('ini_produccion', pSkipCNY(pAddDays(tl.vb_mockup, 3)));
   }
-  tl.embarque       = pSkipCNY(pAddWork(tl.ini_produccion, bulkDays));
-  tl.llegada_aduana = pSkipCNY(pAddDays(tl.embarque, transit));
-  tl.entrega_final  = pSkipCNY(pAddDays(tl.llegada_aduana, 15));
+
+  if(prod.crd){
+    var crdDate=pDate(prod.crd);
+    if(crdDate && !isNaN(crdDate)){
+      tl.embarque = pSkipCNY(pAddDays(crdDate, 3));
+      var iniProdFromCRD = pSkipCNY(pAddDays(crdDate, -bulkDays));
+      var minIniProd = prod.req_muestra ? pSkipCNY(pAddDays(tl.apr_muestra||tl.vb_mockup, 2)) : pSkipCNY(pAddDays(tl.vb_mockup, 3));
+      tl.ini_produccion = (iniProdFromCRD < minIniProd) ? minIniProd : iniProdFromCRD;
+      tl.crd = crdDate;
+    }
+  } else {
+    tl.embarque = anch('embarque', pSkipCNY(pAddWork(tl.ini_produccion, bulkDays)));
+  }
+
+  var internDays = prod.mode==='air' ? 2 : 15;
+  tl.llegada_aduana = anch('llegada_aduana', pSkipCNY(pAddDays(tl.embarque, transit)));
+  tl.entrega_final  = anch('entrega_final',  pSkipCNY(pAddDays(tl.llegada_aduana, internDays)));
   return tl;
 }
 
 // ── MODAL ──
 function pedOpenNewModal(){
+  pedEditingOid=null;
+  document.getElementById('ped-modal-title').textContent='Nueva Orden Confirmada';
   pmProdCount=0;
-  ['pm-nv','pm-promo','pm-oc','pm-cliente','pm-notas'].forEach(function(id){
+  ['pm-nv','pm-oc','pm-cliente','pm-notas'].forEach(function(id){
     var el=document.getElementById(id); if(el) el.value='';
   });
   document.getElementById('pm-fecha').value=new Date().toISOString().slice(0,10);
-  document.getElementById('pm-pago-cond').value='';
-  document.getElementById('pm-pago-fecha').value='';
+
   document.getElementById('pm-prods').innerHTML='';
   document.getElementById('pm-total-display').textContent='—';
   pedAddProdRow();
+  document.getElementById('ped-modal').style.display='flex';
+}
+
+function pedOpenEditModal(oid){
+  var o=pedOrders[oid]; if(!o) return;
+  pedEditingOid=oid;
+  document.getElementById('ped-modal-title').textContent='Editar Orden — '+o.nv;
+  pmProdCount=0;
+  document.getElementById('pm-nv').value=o.nv||'';
+  var _prel=document.getElementById('pm-promo'); if(_prel&&_prel.tagName==='INPUT') _prel.value=o.promo||'';
+  document.getElementById('pm-oc').value=o.oc_cliente||'';
+  document.getElementById('pm-cliente').value=o.cliente||'';
+  document.getElementById('pm-fecha').value=o.conf_date||'';
+
+  document.getElementById('pm-notas').value=o.notes||'';
+  // Load existing products
+  document.getElementById('pm-prods').innerHTML='';
+  (o.productos||[]).forEach(function(prod){
+    pedAddProdRow();
+    var rows=document.querySelectorAll('#pm-prods > div');
+    var row=rows[rows.length-1];
+    var _nm=row.querySelector('.pm-nombre'); if(_nm) _nm.value=prod.nombre||prod.descripcion||'';
+    row.querySelector('.pm-desc').value=prod.sku||prod.descripcion||'';
+    var _pr=row.querySelector('.pm-promo-prod'); if(_pr) _pr.value=prod.promo||'';
+    var _pi=row.querySelector('.pm-pi'); if(_pi) _pi.value=prod.pi_num||'';
+    row.querySelector('.pm-tipo').value=prod.tipoTiempo||'';
+    row.querySelector('.pm-cant').value=prod.cantidad||1;
+    row.querySelector('.pm-punit').value=prod.precio_unitario||0;
+    var reqM=row.querySelector('.pm-req-muestra');
+    if(reqM){ reqM.checked=!!prod.req_muestra; reqM.dispatchEvent(new Event('change')); }
+    var aprSel=row.querySelector('.pm-apr[value="'+prod.tipo_aprobacion+'"]');
+    if(aprSel) aprSel.checked=true;
+    var modeSel=row.querySelector('.pm-mode');
+    if(modeSel) modeSel.value=prod.mode||'sea';
+    var pagoCond=row.querySelector('.pm-pago-cond');
+    if(pagoCond) pagoCond.value=prod.pago_cond||'';
+    var pagoFecha=row.querySelector('.pm-pago-fecha');
+    if(pagoFecha) pagoFecha.value=prod.pago_fecha||'';
+    var diasM=row.querySelector('.pm-dias-m');
+    if(diasM) diasM.value=prod.dias_muestra||'';
+    var diasP=row.querySelector('.pm-dias-p');
+    if(diasP) diasP.value=prod.dias_produccion||'';
+    var crdEl=row.querySelector('.pm-crd');
+    if(crdEl) crdEl.value=prod.crd||'';
+  });
+  pedRecalcTotal();
   document.getElementById('ped-modal').style.display='flex';
 }
 function pedCloseModal(){ document.getElementById('ped-modal').style.display='none'; }
@@ -3110,12 +3209,26 @@ function pedAddProdRow(){
   });
 
   row.innerHTML=
-    '<div style="display:grid;grid-template-columns:2fr 1.6fr 70px 90px 32px;gap:6px;align-items:center">'+
-      '<input type="text" placeholder="Descripción / SKU" class="pm-desc" style="padding:6px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--f);font-size:12px;outline:none">'+
+    '<div style="display:grid;grid-template-columns:2fr 1fr 1.4fr 70px 90px 32px;gap:6px;align-items:center">'+
+      '<input type="text" placeholder="Nombre visible (ej: Llavero PVC Breslerin)" class="pm-nombre" style="padding:6px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--f);font-size:12px;outline:none">'+
+      '<input type="text" placeholder="SKU interno" class="pm-desc" style="padding:6px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none">'+
       '<select class="pm-tipo" style="padding:6px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--f);font-size:11px;outline:none">'+tipoOpts+'</select>'+
       '<input type="number" placeholder="Cant." min="1" class="pm-cant" style="padding:6px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:12px;outline:none;text-align:center">'+
       '<input type="number" placeholder="P.Unit" min="0" class="pm-punit" style="padding:6px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:12px;outline:none;text-align:right">'+
       '<button onclick="pedRemoveProdRow(this)" style="padding:4px 8px;border:1px solid #ddd;border-radius:var(--r);background:#fff;cursor:pointer;color:var(--tx-d)">✕</button>'+
+    '</div>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:4px">'+
+      '<input type="text" placeholder="PROMO #" class="pm-promo-prod" style="padding:5px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none">'+
+      '<input type="text" placeholder="PI # (ref. proveedor)" class="pm-pi" style="padding:5px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none">'+
+      '<div style="font-size:10px;color:var(--tx-d);display:flex;align-items:center">Nombre · SKU · PROMO · PI#</div>'+
+    '</div>'+
+    '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:4px">'+
+      '<span style="font-size:10px;font-weight:700;color:var(--tx-d)">⏱ Días:</span>'+
+      '<label style="font-size:10px;color:var(--tx-d);display:flex;align-items:center;gap:3px">Muestra <input type="number" placeholder="auto" min="1" class="pm-dias-m" style="width:48px;padding:3px 5px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none;text-align:center"></label>'+
+      '<label style="font-size:10px;color:var(--tx-d);display:flex;align-items:center;gap:3px">Producción <input type="number" placeholder="auto" min="1" class="pm-dias-p" style="width:48px;padding:3px 5px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none;text-align:center"></label>'+
+      '<span style="font-size:10px;color:var(--tx-d);margin-left:8px">📦 CRD:</span>'+
+      '<input type="date" class="pm-crd" style="padding:3px 6px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none">'+
+      '<span style="font-size:9px;color:var(--tx-d)">(cargo ready date)</span>'+
     '</div>'+
     '<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">'+
       '<label style="font-size:11px;color:var(--tx-d);display:flex;align-items:center;gap:5px"><input type="checkbox" class="pm-req-muestra" style="accent-color:var(--gold)"> Requiere muestra</label>'+
@@ -3129,6 +3242,22 @@ function pedAddProdRow(){
           '<option value="sea">🚢 Marítimo</option><option value="air">✈ Aéreo</option>'+
         '</select>'+
       '</label>'+
+    '</div>'+
+    '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-top:4px;border-top:1px solid #f0ece4;margin-top:2px">'+
+      '<span style="font-size:11px;font-weight:600;color:var(--tx-d)">💳 Pago proveedor:</span>'+
+      '<select class="pm-pago-cond" style="padding:3px 8px;border:1px solid #ddd;border-radius:var(--r);font-size:11px;font-family:var(--f);outline:none;flex:1;min-width:180px">'+
+        '<option value="">— Sin especificar —</option>'+
+        '<option value="anticipo_muestra">Anticipo para iniciar muestras</option>'+
+        '<option value="anticipo_produccion">Anticipo para iniciar producción</option>'+
+        '<option value="pago_embarque">Pago completo antes del embarque</option>'+
+        '<option value="30_70">30% anticipo / 70% antes embarque</option>'+
+        '<option value="50_50">50% anticipo / 50% antes embarque</option>'+
+        '<option value="100_anticipado">100% anticipo</option>'+
+        '<option value="credito_30">Crédito 30 días</option>'+
+        '<option value="otro">Otro (ver notas)</option>'+
+      '</select>'+
+      '<label style="font-size:11px;color:var(--tx-d)">Fecha pago:</label>'+
+      '<input type="date" class="pm-pago-fecha" style="padding:3px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none">'+
     '</div>';
   row.dataset.row=idx;
   row.querySelector('.pm-req-muestra').addEventListener('change',function(){
@@ -3161,8 +3290,11 @@ function pedSaveOrder(){
   var prods=[];
   var total=0;
   prodRows.forEach(function(row){
+    var nombre=(row.querySelector('.pm-nombre')||{value:''}).value.trim();
     var desc=(row.querySelector('.pm-desc').value||'').trim();
-    if(!desc) return;
+    var promoProd=(row.querySelector('.pm-promo-prod')||{value:''}).value.trim();
+    var piNum=(row.querySelector('.pm-pi')||{value:''}).value.trim();
+    if(!nombre&&!desc) return;
     var tipo=row.querySelector('.pm-tipo').value||'';
     var cant=parseInt(row.querySelector('.pm-cant').value)||1;
     var punit=parseFloat(row.querySelector('.pm-punit').value)||0;
@@ -3170,13 +3302,21 @@ function pedSaveOrder(){
     var aprEl=row.querySelector('.pm-apr:checked');
     var apr=aprEl?aprEl.value:'foto_video';
     var mode=row.querySelector('.pm-mode').value;
+    var pagoCond=row.querySelector('.pm-pago-cond')?row.querySelector('.pm-pago-cond').value:'';
+    var pagoFecha=row.querySelector('.pm-pago-fecha')?row.querySelector('.pm-pago-fecha').value:'';
+    var diasM=parseInt((row.querySelector('.pm-dias-m')||{value:''}).value)||0;
+    var diasP=parseInt((row.querySelector('.pm-dias-p')||{value:''}).value)||0;
+    var crd=(row.querySelector('.pm-crd')||{value:''}).value||'';
     total+=cant*punit;
     prods.push({
       id:Date.now()+Math.random(),
-      descripcion:desc, tipoTiempo:tipo,
+      nombre:nombre||desc, sku:desc, promo:promoProd, pi_num:piNum,
+      descripcion:nombre||desc, tipoTiempo:tipo,
       cantidad:cant, precio_unitario:punit,
+      dias_muestra:diasM||null, dias_produccion:diasP||null, crd:crd||null,
       req_muestra:reqM, tipo_aprobacion:apr,
       mode:mode, conf_date:fecha,
+      pago_cond:pagoCond, pago_fecha:pagoFecha,
       current_stage:'confirmacion',
       milestones_real:{}, rejected:false,
       selected_for_pdf:true, notes:''
@@ -3184,25 +3324,55 @@ function pedSaveOrder(){
   });
   if(!prods.length){toast('Agrega al menos un producto');return;}
 
-  var oid=String(Date.now());
-  pedOrders[oid]={
-    id:oid,
-    nv:nv,
-    promo:(document.getElementById('pm-promo').value||'').trim(),
-    oc_cliente:(document.getElementById('pm-oc').value||'').trim(),
-    cliente:cliente,
-    conf_date:fecha,
-    total:total,
-    pago_cond:document.getElementById('pm-pago-cond').value,
-    pago_fecha:document.getElementById('pm-pago-fecha').value,
-    notes:document.getElementById('pm-notas').value.trim(),
-    source:'manual',
-    productos:prods
-  };
-  pedSave();
-  pedCloseModal();
-  pedSwitchTo(oid,0);
-  toast('✓ Orden creada');
+  if(pedEditingOid && pedOrders[pedEditingOid]){
+    // EDIT MODE — preserve existing product gantt data (milestones_real, current_stage, etc.)
+    var existing=pedOrders[pedEditingOid];
+    var existingProds=existing.productos||[];
+    // Match new products to existing by descripcion to preserve gantt progress
+    prods=prods.map(function(np){
+      var found=existingProds.find(function(ep){return ep.descripcion===np.descripcion;});
+      if(found){
+        // Keep gantt tracking fields, update editable fields
+        return Object.assign({},found,{
+          descripcion:np.descripcion, tipoTiempo:np.tipoTiempo,
+          cantidad:np.cantidad, precio_unitario:np.precio_unitario,
+          req_muestra:np.req_muestra, tipo_aprobacion:np.tipo_aprobacion,
+          mode:np.mode, conf_date:np.conf_date
+        });
+      }
+      return np; // new product
+    });
+    pedOrders[pedEditingOid]=Object.assign({},existing,{
+      nv:nv,
+      promo:'',
+      oc_cliente:(document.getElementById('pm-oc').value||'').trim(),
+      cliente:cliente, conf_date:fecha, total:total,
+  
+  
+      notes:document.getElementById('pm-notas').value.trim(),
+      productos:prods
+    });
+    pedSave(); pedCloseModal();
+    pedSwitchTo(pedEditingOid, Math.min(pedSelProd, prods.length-1));
+    pedEditingOid=null;
+    toast('✓ Orden actualizada');
+  } else {
+    // NEW ORDER
+    var oid=String(Date.now());
+    pedOrders[oid]={
+      id:oid, nv:nv,
+      promo:'',
+      oc_cliente:(document.getElementById('pm-oc').value||'').trim(),
+      cliente:cliente, conf_date:fecha, total:total,
+  
+  
+      notes:document.getElementById('pm-notas').value.trim(),
+      source:'manual', productos:prods
+    };
+    pedSave(); pedCloseModal();
+    pedSwitchTo(oid,0);
+    toast('✓ Orden creada');
+  }
 }
 
 // ── CONFIRM FROM HISTORIAL ──
@@ -3338,6 +3508,7 @@ function pedRenderSidebar(){
       '<div style="font-size:10px;color:var(--tx-d);margin-top:4px">'+o.conf_date+' · '+nProds+' producto'+(nProds!==1?'s':'')+'</div>'+
       (o.total?'<div style="font-size:11px;font-weight:700;color:'+(o.archived?'#aaa':'var(--gold-d)')+';font-family:var(--m);margin-top:3px">'+clp(o.total)+'</div>':'')+
       '<div style="margin-top:6px;display:flex;gap:5px">'+
+        '<button class="ped-edit-btn" style="padding:2px 8px;border:1px solid var(--gold);border-radius:var(--r);background:#fff;color:var(--gold-d);font-size:10px;cursor:pointer;font-family:var(--f)">✏️ Editar</button>'+
         '<button class="ped-arc-btn" style="padding:2px 8px;border:1px solid #ddd;border-radius:var(--r);background:#fff;color:#666;font-size:10px;cursor:pointer;font-family:var(--f)">'+(o.archived?'↩ Activar':'📦 Archivar')+'</button>'+
         '<button class="ped-del-btn" data-oid="'+oid+'" style="padding:2px 8px;border:1px solid #ddd;border-radius:var(--r);background:#fff;color:#d94f3d;font-size:10px;cursor:pointer;font-family:var(--f)">🗑 Eliminar</button>'+
       '</div>';
@@ -3358,6 +3529,11 @@ function pedRenderSidebar(){
       ev.stopPropagation();
       o.archived=!o.archived; pedSave(); pedRenderSidebar();
       if(o.archived&&pedSelOrder===oid){pedSelOrder=null;pedRenderMain();}
+    });
+    var editBtn=card.querySelector('.ped-edit-btn');
+    if(editBtn) editBtn.addEventListener('click',function(ev){
+      ev.stopPropagation();
+      pedOpenEditModal(oid);
     });
     list.appendChild(card);
   });
@@ -3396,6 +3572,8 @@ function pedRenderMain(){
   html+='<div style="text-align:right">';
   if(o.total) html+='<div style="font-size:17px;font-weight:700;color:var(--gold-d);font-family:var(--m)">'+clp(o.total)+'</div>';
   html+='<button onclick="pedDeleteOrder(this.dataset.oid)" data-oid="'+pedSelOrder+'" style="margin-top:6px;padding:2px 8px;border:1px solid #ddd;border-radius:var(--r);background:#fff;color:#d94f3d;font-size:10px;cursor:pointer;font-family:var(--f)">🗑 Eliminar orden</button>';
+  html+='<button onclick="pedGenerateMultiPDF(this.dataset.oid)" data-oid="'+pedSelOrder+'" style="margin-top:6px;margin-left:5px;padding:2px 8px;border:1px solid var(--gold);border-radius:var(--r);background:#fff;color:var(--gold-d);font-size:10px;cursor:pointer;font-family:var(--f)">🖨 PDF orden completa</button>';
+  html+='<button class="edit-orden-btn" style="margin-top:6px;margin-left:5px;padding:2px 8px;border:1px solid var(--gold);border-radius:var(--r);background:#fff;color:var(--gold-d);font-size:10px;cursor:pointer;font-family:var(--f)">✏️ Editar orden</button>';
   html+='</div></div>';
 
   // ── PRODUCT TABS ──
@@ -3414,13 +3592,22 @@ function pedRenderMain(){
   var t=times[prod.tipoTiempo]||{};
   html+='<div style="background:#fff;border-radius:var(--rl);padding:14px 18px;box-shadow:var(--shadow);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">';
   html+='<div>';
-  html+='<div style="font-size:15px;font-weight:700">'+prod.descripcion+'</div>';
+  var _pt=prod.nombre||prod.descripcion||'Producto';
+  html+='<div style="font-size:15px;font-weight:700">'+_pt+'</div>';
+  var _meta=[];
+  if(prod.sku&&prod.sku!==_pt) _meta.push('SKU: '+prod.sku);
+  if(prod.promo) _meta.push('PROMO: '+prod.promo);
+  if(prod.pi_num) _meta.push('PI#: '+prod.pi_num);
+  if(_meta.length) html+='<div style="font-size:11px;font-family:var(--m);color:var(--tx-d);margin-top:2px">'+_meta.join(' &nbsp;&middot;&nbsp; ')+'</div>';
   html+='<div style="font-size:11px;color:var(--tx-d);margin-top:4px;display:flex;gap:12px;flex-wrap:wrap">';
   if(prod.tipoTiempo) html+='<span>'+prod.tipoTiempo+'</span>';
-  if(t.sample_days) html+='<span>Muestra: '+t.sample_days+'d</span>';
-  if(t.bulk_days) html+='<span>Bulk: '+t.bulk_days+'d</span>';
+  var _sd=prod.dias_muestra||(t.sample_days||0); var _bd=prod.dias_produccion||(t.bulk_days||0);
+  if(_sd) html+='<span>Muestra: '+(prod.dias_muestra?'<b>'+prod.dias_muestra+'d✎</b>':_sd+'d')+'</span>';
+  if(_bd) html+='<span>Prod: '+(prod.dias_produccion?'<b>'+prod.dias_produccion+'d✎</b>':_bd+'d')+'</span>';
   html+='<span>'+(prod.mode==='air'?'✈ Aéreo':'🚢 Marítimo')+'</span>';
   if(prod.req_muestra) html+='<span style="color:#22a05b">🧪 Con muestra ('+(prod.tipo_aprobacion==='fisica'?'física +12d':'foto/video')+')</span>';
+  if(prod.crd) html+='<span style="background:#e8f5ef;color:#197a46;padding:2px 6px;border-radius:10px;font-weight:600">📦 CRD: '+pCL(pDate(prod.crd))+'</span>';
+  if(prod.pago_cond) html+='<span style="color:#7a4800">💳 '+prod.pago_cond.replace(/_/g,' ')+(prod.pago_fecha?' · '+pCL(pDate(prod.pago_fecha)):'')+'</span>';
   html+='</div></div>';
   html+='<div style="text-align:right">';
   if(prod.precio_unitario) html+='<div style="font-size:13px;font-weight:600;font-family:var(--m)">'+prod.cantidad+' u × '+clp(prod.precio_unitario)+' = '+clp(prod.cantidad*prod.precio_unitario)+'</div>';
@@ -3445,8 +3632,8 @@ function pedRenderMain(){
       phases.push({label:'Mockup',small:'~5d',s:'envio_aw',e:'ini_produccion'});
     }
     phases.push({label:'Producción',small:'~'+(t.bulk_days||25)+'d',s:'ini_produccion',e:'embarque'});
-    phases.push({label:'Tránsito',small:(prod.mode==='air'?'15':'45')+'d',s:'embarque',e:'llegada_aduana'});
-    phases.push({label:'Internación',small:'15d',s:'llegada_aduana',e:'entrega_final'});
+    phases.push({label:'Tránsito',small:(prod.mode==='air'?'12':'45')+'d',s:'embarque',e:'llegada_aduana'});
+    phases.push({label:'Internación',small:(prod.mode==='air'?'2':'15')+'d',s:'llegada_aduana',e:'entrega_final'});
 
     // Axis
     var axisHTML='<div style="position:relative;margin-left:150px;height:18px;margin-bottom:4px">';
@@ -3474,31 +3661,62 @@ function pedRenderMain(){
           '<div style="position:absolute;left:'+left+'%;width:'+width+'%;top:4px;height:20px;border-radius:4px;background:var(--gold-l,#f5e09a);border:1.5px solid var(--gold)"></div>'+
           realBar+
           '<div style="position:absolute;left:'+pct(today)+'%;top:0;bottom:0;width:2px;background:#d94f3d;z-index:2"><span style="position:absolute;top:-14px;font-size:8px;color:#d94f3d;font-weight:700;transform:translateX(-50%)">HOY</span></div>'+
+          (function(){var z='';CNY.forEach(function(p){var cs=pDate(p.s),ce=pDate(p.e);if(!cs||!ce)return;var cx=Math.max(0,pct(cs)),cw=Math.min(100,pct(ce))-cx;if(cw>0)z+='<div style="position:absolute;left:'+cx+'%;width:'+cw+'%;top:0;bottom:0;background:rgba(255,140,0,.13);border-left:2px dashed rgba(255,140,0,.5);border-right:2px dashed rgba(255,140,0,.5);z-index:1;pointer-events:none"></div>';});return z;})()+
         '</div></div>';
     });
 
-    // Milestone dots
+    // Milestone dots — grouped + alternating labels
     var currentIdx=milestones.findIndex(function(m){return m.key===prod.current_stage;});
-    var msHTML='<div style="position:relative;margin-left:146px;height:80px;margin-top:12px"><div style="position:absolute;top:13px;left:0;right:0;height:2px;background:var(--bg2)"></div>';
-    milestones.forEach(function(mk,idx){
-      var estD=tl[mk.key]; if(!estD) return;
-      var lp=pct(estD);
-      var status=idx<currentIdx?'done':(idx===currentIdx?'current':'pending');
-      var bc=status==='done'?'#22a05b':status==='current'?'var(--gold)':'#ccc';
-      var bg=status==='done'?'#e8f5ef':status==='current'?'var(--gold-l,#f5e09a)':'#fff';
-      var realD=prod.milestones_real[mk.key]?pCL(pDate(prod.milestones_real[mk.key])):'';
-      msHTML+='<div style="position:absolute;left:'+lp+'%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center" title="'+mk.label+(realD?' · Real: '+realD:'')+'">';
-      msHTML+=status==='current'?'<div style="position:absolute;top:-18px;font-size:8px;color:var(--gold-d);font-weight:700;white-space:nowrap">▼ aquí</div>':'';
-      msHTML+='<div style="width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;border:2px solid '+bc+';background:'+bg+';z-index:2;'+(status==='current'?'box-shadow:0 0 0 3px rgba(221,180,67,.2)':status==='pending'?'opacity:.6':'')+'">'+(status==='done'?'✓':mk.icon)+'</div>';
-      msHTML+='<div style="font-size:8px;color:'+(status==='current'?'var(--gold-d)':status==='done'?'#22a05b':'var(--tx-d)')+';text-align:center;width:60px;line-height:1.2;margin-top:2px;font-weight:'+(status==='current'?'700':'400')+'">'+mk.label+'</div>';
-      msHTML+='<div style="font-size:7px;font-family:var(--m);color:var(--tx-d)">'+pCL(estD)+'</div>';
-      if(realD) msHTML+='<div style="font-size:7px;font-family:var(--m);color:#22a05b">✓'+realD+'</div>';
+    var msRaw=milestones.map(function(mk,idx){
+      var estD=tl[mk.key]; if(!estD) return null;
+      return {mk:mk,idx:idx,lp:pct(estD),estD:estD};
+    }).filter(Boolean);
+    // Group dots within 3% distance
+    var msGroups=[];
+    msRaw.forEach(function(pt){
+      var last=msGroups[msGroups.length-1];
+      if(last && pt.lp-last.lp<3){
+        last.pts.push(pt);
+        last.lp=last.pts.reduce(function(s,p){return s+p.lp;},0)/last.pts.length;
+      } else { msGroups.push({lp:pt.lp,pts:[pt]}); }
+    });
+    // Assign above/below alternating
+    msGroups.forEach(function(g,i){
+      if(i===0){g.above=true;return;}
+      g.above=(g.lp-msGroups[i-1].lp<8)?!msGroups[i-1].above:(i%2===0);
+    });
+    var DOT_Y=55, CH=100;
+    var msHTML='<div style="position:relative;margin-left:146px;height:'+CH+'px;margin-top:10px">';
+    msHTML+='<div style="position:absolute;top:'+DOT_Y+'px;left:0;right:0;height:2px;background:var(--bg2)"></div>';
+    msGroups.forEach(function(g){
+      var lp=g.lp,above=g.above,pts=g.pts,single=pts.length===1;
+      var rep=pts[0],mk=rep.mk,idx=rep.idx,estD=rep.estD;
+      var st='pending';
+      if(pts.every(function(p){return p.idx<currentIdx;})) st='done';
+      pts.forEach(function(p){if(p.idx===currentIdx) st='current';});
+      var bc=st==='done'?'#22a05b':st==='current'?'var(--gold)':'#ccc';
+      var bg=st==='done'?'#e8f5ef':st==='current'?'var(--gold-l,#f5e09a)':'#fff';
+      var icon=single?(st==='done'?'✓':mk.icon):'<b style="font-size:9px">'+pts.length+'</b>';
+      var lbl=single?(mk.label.length>14?mk.label.slice(0,13)+'…':mk.label):(pts[0].mk.label.slice(0,8)+'… +'+(pts.length-1));
+      var realD=single?(prod.milestones_real[mk.key]?pCL(pDate(prod.milestones_real[mk.key])):''):'';
+      var dStr=realD?'✓'+realD:pCL(estD);
+      var lc=st==='current'?'var(--gold-d)':st==='done'?'#22a05b':'var(--tx-d)';
+      var tip=pts.map(function(p){var r=prod.milestones_real[p.mk.key]?pCL(pDate(prod.milestones_real[p.mk.key])):'';return p.mk.label+(r?' ✓'+r:'');}).join(' | ');
+      msHTML+='<div style="position:absolute;left:'+lp+'%;transform:translateX(-50%)" title="'+tip+'">';
+      if(st==='current') msHTML+='<div style="position:absolute;top:'+(DOT_Y-30)+'px;left:50%;transform:translateX(-50%);font-size:8px;color:var(--gold-d);font-weight:700;white-space:nowrap">▼ aquí</div>';
+      if(above){
+        msHTML+='<div style="position:absolute;bottom:'+(CH-DOT_Y+8)+'px;left:50%;transform:translateX(-50%);text-align:center;white-space:nowrap"><div style="font-size:8px;color:'+lc+';font-weight:'+(st==='current'?'700':'400')+'">'+lbl+'</div><div style="font-size:7px;font-family:var(--m);color:'+(realD?'#22a05b':'#aaa')+'">'+dStr+'</div></div>';
+        msHTML+='<div style="position:absolute;left:50%;width:1px;background:#ddd;bottom:'+(CH-DOT_Y+1)+'px;height:7px"></div>';
+      } else {
+        msHTML+='<div style="position:absolute;top:'+(DOT_Y+14)+'px;left:50%;transform:translateX(-50%);text-align:center;white-space:nowrap"><div style="font-size:8px;color:'+lc+';font-weight:'+(st==='current'?'700':'400')+'">'+lbl+'</div><div style="font-size:7px;font-family:var(--m);color:'+(realD?'#22a05b':'#aaa')+'">'+dStr+'</div></div>';
+        msHTML+='<div style="position:absolute;left:50%;width:1px;background:#ddd;top:'+(DOT_Y+1)+'px;height:7px"></div>';
+      }
+      msHTML+='<div style="position:absolute;left:50%;transform:translateX(-50%);top:'+(DOT_Y-12)+'px;width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;border:2px solid '+bc+';background:'+bg+';z-index:3;'+(st==='current'?'box-shadow:0 0 0 3px rgba(221,180,67,.2)':st==='pending'?'opacity:.5':'')+'">'+icon+'</div>';
       msHTML+='</div>';
     });
     msHTML+='</div>';
-
     html+='<div style="background:#fff;border-radius:var(--rl);padding:16px 18px;box-shadow:var(--shadow)">';
-    html+='<div style="font-size:11px;font-weight:700;color:var(--tx-d);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">📊 Gantt de Producción — '+prod.descripcion+'</div>';
+    html+='<div style="font-size:11px;font-weight:700;color:var(--tx-d);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px">📊 Gantt de Producción — '+(prod.nombre||prod.descripcion)+'</div>';
     html+=axisHTML+barsHTML;
     html+='<div style="display:flex;gap:12px;margin-top:4px;margin-left:146px;font-size:10px;color:var(--tx-d)">'+
       '<span><span style="display:inline-block;width:12px;height:6px;background:var(--gold-l);border:1.5px solid var(--gold);border-radius:2px"></span> Est.</span>'+
@@ -3524,17 +3742,54 @@ function pedRenderMain(){
 
   editHTML+='<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:11px;font-weight:600;color:var(--tx-d)">Fecha confirmación</label><input type="date" id="ped-confdate" value="'+(prod.conf_date||o.conf_date)+'" style="padding:5px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none"></div>';
 
+  // Manual days
+  editHTML+='<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:11px;font-weight:600;color:var(--tx-d)">⏱ Días muestra (manual)</label><input type="number" id="ped-dias-m" placeholder="Auto ('+((times[prod.tipoTiempo]||{}).sample_days||'—')+'d)" min="1" value="'+(prod.dias_muestra||'')+'" style="padding:5px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none"></div>';
+  editHTML+='<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:11px;font-weight:600;color:var(--tx-d)">⏱ Días producción (manual)</label><input type="number" id="ped-dias-p" placeholder="Auto ('+((times[prod.tipoTiempo]||{}).bulk_days||'—')+'d)" min="1" value="'+(prod.dias_produccion||'')+'" style="padding:5px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none"></div>';
+  editHTML+='<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:11px;font-weight:600;color:var(--tx-d)">📦 CRD — Cargo Ready Date</label><input type="date" id="ped-crd" value="'+(prod.crd||'')+'" style="padding:5px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none"><small style="font-size:10px;color:var(--tx-d)">Calcula hacia atrás desde esta fecha</small></div>';
+
   editHTML+='<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:11px;font-weight:600;color:var(--tx-d)">Requiere muestra</label><div style="display:flex;gap:8px;align-items:center;padding-top:4px"><input type="checkbox" id="ped-req-m"'+(prod.req_muestra?' checked':'')+' style="accent-color:var(--gold);width:15px;height:15px"><span style="font-size:11px;color:var(--tx-d)">Sí</span></div></div>';
 
-  editHTML+='<div style="display:flex;flex-direction:column;gap:3px" id="ped-apr-wrap" '+(prod.req_muestra?'':'style="display:none!important"')+'>'+
-    '<label style="font-size:11px;font-weight:600;color:var(--tx-d)">Tipo aprobación</label>'+
-    '<select id="ped-apr" style="padding:5px 8px;border:1px solid #ddd;border-radius:var(--r);font-size:11px;font-family:var(--f);outline:none">'+
-    '<option value="foto_video"'+(prod.tipo_aprobacion==='foto_video'?' selected':'')+'>Foto/video</option>'+
-    '<option value="fisica"'+(prod.tipo_aprobacion==='fisica'?' selected':'')+'>Muestra física (+12d)</option>'+
-    '</select></div>';
+  // Muestras múltiples
+  if(prod.req_muestra){
+    var muestras=prod.muestras||[{tipo_aprobacion:prod.tipo_aprobacion||'foto_video',rechazada:false}];
+    editHTML+='<div style="grid-column:1/-1;background:var(--bg);border-radius:var(--r);padding:10px 12px;display:flex;flex-direction:column;gap:8px">';
+    editHTML+='<div style="font-size:11px;font-weight:700;color:var(--tx-d);display:flex;justify-content:space-between;align-items:center">🧪 Muestras';
+    if(muestras.length<3) editHTML+='<button id="btn-add-muestra" style="padding:2px 8px;border:1px solid var(--gold);border-radius:var(--r);background:#fff;color:var(--gold-d);font-size:10px;cursor:pointer;font-family:var(--f)">+ Agregar muestra</button>';
+    editHTML+='</div>';
+    muestras.forEach(function(mu,i){
+      var n=i+1;
+      var isRej=mu.rechazada;
+      editHTML+='<div style="border:1.5px solid '+(isRej?'#d94f3d':'#ddd')+';border-radius:var(--r);padding:8px 10px;background:'+(isRej?'#fde8e5':'#fff')+'" data-midx="'+i+'">';
+      editHTML+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">';
+      editHTML+='<span style="font-size:11px;font-weight:700;color:'+(isRej?'#d94f3d':'var(--tx)')+'">Muestra '+n+(isRej?' — Rechazada':'')+'</span>';
+      editHTML+='<select class="mu-apr" data-midx="'+i+'" style="padding:3px 6px;border:1px solid #ddd;border-radius:var(--r);font-size:11px;font-family:var(--f);outline:none">';
+      editHTML+='<option value="foto_video"'+(mu.tipo_aprobacion==='foto_video'?' selected':'')+'>Foto/video</option>';
+      editHTML+='<option value="fisica"'+(mu.tipo_aprobacion==='fisica'?' selected':'')+'>Física (+12d)</option>';
+      editHTML+='</select>';
+      if(!isRej && i===muestras.length-1 && i>0){
+        editHTML+='<button class="btn-rej-mu" data-midx="'+i+'" style="padding:2px 8px;border:1px solid #d94f3d;border-radius:var(--r);background:#fff;color:#d94f3d;font-size:10px;cursor:pointer;font-family:var(--f);margin-left:auto">🔴 Rechazar</button>';
+      } else if(isRej){
+        editHTML+='<button class="btn-unrej-mu" data-midx="'+i+'" style="padding:2px 8px;border:1px solid #ddd;border-radius:var(--r);background:#fff;color:#666;font-size:10px;cursor:pointer;font-family:var(--f);margin-left:auto">↩ Deshacer</button>';
+      }
+      editHTML+='</div>';
+      // Real dates for this muestra
+      editHTML+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">';
+      editHTML+='<div><label style="font-size:10px;color:var(--tx-d)">Inicio real</label><input type="date" class="ped-ms-real mu-ini-real" data-key="ini_muestra_'+n+'" value="'+(prod.milestones_real['ini_muestra_'+n]||'')+'" style="width:100%;padding:4px 6px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none"></div>';
+      editHTML+='<div><label style="font-size:10px;color:var(--tx-d)">'+(isRej?'Rechazo real':'Aprobación real')+'</label><input type="date" class="ped-ms-real mu-apr-real" data-key="apr_muestra_'+n+'" value="'+(prod.milestones_real['apr_muestra_'+n]||'')+'" style="width:100%;padding:4px 6px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none"></div>';
+      // Arte definitivo: shown on last rejected muestra if no new muestra will follow
+      if(isRej && i===muestras.length-1){
+        editHTML+='<div style="grid-column:1/-1"><label style="font-size:10px;color:#b8941e;font-weight:600">🎨 Envío arte definitivo (sin nueva muestra)</label><input type="date" class="ped-ms-real" data-key="envio_arte_def" value="'+(prod.milestones_real['envio_arte_def']||'')+'" style="width:100%;padding:4px 6px;border:1.5px solid var(--gold);border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none"></div>';
+      }
+      editHTML+='</div></div>';
+    });
+    editHTML+='</div>';
+  } else {
+    editHTML+='<div style="display:none" id="ped-apr-wrap"></div>';
+  }
 
-  // Real dates
+  // Real dates for non-muestra milestones
   milestones.forEach(function(mk){
+    if(mk.isMuestra) return; // handled above
     var val=prod.milestones_real[mk.key]||'';
     editHTML+='<div style="display:flex;flex-direction:column;gap:3px"><label style="font-size:11px;font-weight:600;color:var(--tx-d)">'+mk.icon+' '+mk.label+' (real)</label><input type="date" class="ped-ms-real" data-key="'+mk.key+'" value="'+val+'" style="padding:5px 8px;border:1px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:11px;outline:none"></div>';
   });
@@ -3545,32 +3800,120 @@ function pedRenderMain(){
   editHTML+='<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">';
   editHTML+='<button id="ped-save-btn" style="padding:7px 16px;border:none;border-radius:var(--r);background:var(--gold);color:#fff;font-family:var(--f);font-size:12px;font-weight:600;cursor:pointer">💾 Guardar seguimiento</button>';
   editHTML+='<button id="ped-pdf-btn" style="padding:7px 16px;border:1.5px solid var(--gold);border-radius:var(--r);background:#fff;color:var(--gold-d);font-family:var(--f);font-size:12px;font-weight:600;cursor:pointer">🖨 PDF cliente</button>';
+  editHTML+='<button id="ped-angela-btn" style="padding:7px 16px;border:1.5px solid #7a4800;border-radius:var(--r);background:#fff;color:#7a4800;font-family:var(--f);font-size:12px;font-weight:600;cursor:pointer">📋 PDF Angela</button>';
+  editHTML+='</div>';
+  // PDF options panel
+  editHTML+='<div style="margin-top:10px;padding:10px 12px;background:var(--bg);border-radius:var(--r)">';
+  editHTML+='<div style="font-size:10px;font-weight:700;color:var(--tx-d);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Opciones PDF cliente:</div>';
+  // Total días toggle
+  var showTotalD=prod.pdf_show_totalD!==false;
+  editHTML+='<label style="font-size:11px;display:flex;align-items:center;gap:5px;margin-bottom:8px;cursor:pointer"><input type="checkbox" id="pdf-show-totald"'+(showTotalD?' checked':'')+' style="accent-color:var(--gold)"> Mostrar total días estimados</label>';
+  editHTML+='<div style="font-size:10px;font-weight:700;color:var(--tx-d);margin-bottom:6px">Hitos a mostrar:</div>';
+  editHTML+='<div style="display:flex;flex-wrap:wrap;gap:6px">';
+  milestones.forEach(function(mk){
+    var checked=!prod.pdf_milestones||(prod.pdf_milestones.indexOf(mk.key)>=0);
+    editHTML+='<label style="font-size:11px;display:flex;align-items:center;gap:4px;cursor:pointer;background:#fff;padding:3px 8px;border-radius:20px;border:1px solid #e5e3de"><input type="checkbox" class="pdf-ms-sel" data-key="'+mk.key+'"'+(checked?' checked':'')+' style="accent-color:var(--gold)"> '+mk.icon+' '+mk.label+'</label>';
+  });
   editHTML+='</div></div>';
+  editHTML+='</div>';
 
   html+=editHTML;
   main.innerHTML=html;
 
   // ── BIND EVENTS ──
+  // Edit order button
+  var _editOrdBtn=main.querySelector('[data-action="edit-order"]');
+  if(_editOrdBtn) _editOrdBtn.addEventListener('click',function(){ pedOpenEditModal(pedSelOrder); });
+  var _editOrdBtn2=main.querySelector('.edit-orden-btn');
+  if(_editOrdBtn2) _editOrdBtn2.addEventListener('click',function(){ pedOpenEditModal(pedSelOrder); });
   document.getElementById('ped-req-m').addEventListener('change',function(){
-    var wrap=document.getElementById('ped-apr-wrap');
-    if(wrap) wrap.style.display=this.checked?'flex':'none';
+    prod.req_muestra=this.checked;
+    if(this.checked && (!prod.muestras||!prod.muestras.length)){
+      prod.muestras=[{tipo_aprobacion:prod.tipo_aprobacion||'foto_video',rechazada:false}];
+    }
+    pedSave(); pedRenderMain(); pedRenderSidebar();
+  });
+
+  // Muestra buttons
+  var addMu=document.getElementById('btn-add-muestra');
+  if(addMu) addMu.addEventListener('click',function(){
+    if(!prod.muestras) prod.muestras=[{tipo_aprobacion:'foto_video',rechazada:false}];
+    if(prod.muestras.length<3){
+      // Mark last as rejected before adding new
+      prod.muestras[prod.muestras.length-1].rechazada=true;
+      prod.muestras.push({tipo_aprobacion:'foto_video',rechazada:false});
+    }
+    pedSave(); pedRenderMain();
+  });
+  document.querySelectorAll('.btn-rej-mu').forEach(function(btn){
+    btn.addEventListener('click',function(){
+      var idx=parseInt(btn.dataset.midx);
+      if(!prod.muestras) return;
+      prod.muestras[idx].rechazada=true;
+      if(prod.muestras.length<3) prod.muestras.push({tipo_aprobacion:'foto_video',rechazada:false});
+      pedSave(); pedRenderMain();
+    });
+  });
+  document.querySelectorAll('.btn-unrej-mu').forEach(function(btn){
+    btn.addEventListener('click',function(){
+      var idx=parseInt(btn.dataset.midx);
+      if(!prod.muestras) return;
+      prod.muestras[idx].rechazada=false;
+      // Remove subsequent muestras
+      prod.muestras=prod.muestras.slice(0,idx+1);
+      pedSave(); pedRenderMain();
+    });
+  });
+  document.querySelectorAll('.mu-apr').forEach(function(sel){
+    sel.addEventListener('change',function(){
+      var idx=parseInt(sel.dataset.midx);
+      if(prod.muestras&&prod.muestras[idx]) prod.muestras[idx].tipo_aprobacion=sel.value;
+    });
   });
   document.getElementById('ped-save-btn').addEventListener('click',function(){
-    prod.current_stage=document.getElementById('ped-stage').value;
     prod.mode=document.getElementById('ped-mode').value;
     prod.conf_date=document.getElementById('ped-confdate').value;
+    prod.dias_muestra=parseInt(document.getElementById('ped-dias-m').value)||null;
+    prod.dias_produccion=parseInt(document.getElementById('ped-dias-p').value)||null;
+    prod.crd=document.getElementById('ped-crd').value||null;
     prod.req_muestra=document.getElementById('ped-req-m').checked;
-    prod.tipo_aprobacion=document.getElementById('ped-apr').value;
+    // Save tipo_aprobacion from first muestra for compatibility
+    if(prod.muestras&&prod.muestras.length) prod.tipo_aprobacion=prod.muestras[0].tipo_aprobacion;
+    // Update muestra tipos from selects
+    document.querySelectorAll('.mu-apr').forEach(function(sel){
+      var idx=parseInt(sel.dataset.midx);
+      if(prod.muestras&&prod.muestras[idx]) prod.muestras[idx].tipo_aprobacion=sel.value;
+    });
     prod.notes=document.getElementById('ped-prod-notes').value;
     document.querySelectorAll('.ped-ms-real').forEach(function(inp){
       if(inp.value) prod.milestones_real[inp.dataset.key]=inp.value;
       else delete prod.milestones_real[inp.dataset.key];
     });
+    // Auto-advance: set current_stage to the next milestone after the last one with a real date
+    var ms=pedMilestones(prod);
+    var lastRealIdx=-1;
+    ms.forEach(function(mk,i){ if(prod.milestones_real[mk.key]) lastRealIdx=i; });
+    if(lastRealIdx>=0 && lastRealIdx+1<ms.length){
+      prod.current_stage=ms[lastRealIdx+1].key;
+    } else if(lastRealIdx===ms.length-1){
+      prod.current_stage=ms[ms.length-1].key;
+    } else {
+      prod.current_stage=document.getElementById('ped-stage').value;
+    }
+    // Save pdf milestone selection
+    var pdfSel=[];
+    document.querySelectorAll('.pdf-ms-sel').forEach(function(cb){ if(cb.checked) pdfSel.push(cb.dataset.key); });
+    prod.pdf_milestones=pdfSel.length?pdfSel:null;
+    var tdEl=document.getElementById('pdf-show-totald');
+    if(tdEl) prod.pdf_show_totalD=tdEl.checked;
     pedSave(); pedRenderMain(); pedRenderSidebar();
     toast('✓ Seguimiento guardado');
   });
   document.getElementById('ped-pdf-btn').addEventListener('click',function(){
     pedGeneratePDF(o, prod, tl, milestones);
+  });
+  document.getElementById('ped-angela-btn').addEventListener('click',function(){
+    pedGenerateAngelaPDF(o, prod, tl, milestones);
   });
   }catch(e){ main.innerHTML='<div style="padding:30px;color:#d94f3d;font-size:13px">⚠️ Error al renderizar: '+e.message+'<br><small style="font-family:monospace;color:#999">'+e.stack.split('\n').slice(0,3).join('<br>')+'</small></div>'; }
 }
@@ -3587,142 +3930,437 @@ function pedGeneratePDF(o, prod, tl, milestones){
   if(!tl){toast('Sin timeline');return;}
   var today=new Date();
   var totalD=pDaysBetween(tl.confirmacion,tl.entrega_final);
-  var t=times[prod.tipoTiempo]||{};
 
-  // ── MILESTONE TABLE ROWS (compact) ──
-  var msRows=milestones.map(function(mk){
+  // Filter milestones by pdf selection
+  var pdfMs=prod.pdf_milestones&&prod.pdf_milestones.length
+    ? milestones.filter(function(m){return prod.pdf_milestones.indexOf(m.key)>=0;})
+    : milestones;
+
+  // ── MILESTONE TABLE ──
+  var msRows=pdfMs.map(function(mk){
     var estD=tl[mk.key]?pCL(tl[mk.key]):'—';
     var realD=prod.milestones_real[mk.key]?pCL(pDate(prod.milestones_real[mk.key])):'—';
     var isCurr=mk.key===prod.current_stage;
-    return '<tr style="'+(isCurr?'background:#fdf8ec;font-weight:600':'')+'">'+
-      '<td style="padding:5px 10px;border-bottom:1px solid #f0ece4;font-size:11px">'+mk.icon+' '+mk.label+(isCurr?' ◀':'')+'</td>'+
-      '<td style="padding:5px 10px;border-bottom:1px solid #f0ece4;font-family:monospace;text-align:center;font-size:11px">'+estD+'</td>'+
-      '<td style="padding:5px 10px;border-bottom:1px solid #f0ece4;font-family:monospace;text-align:center;font-size:11px;color:'+(realD!=='—'?'#22a05b':'#ccc')+'">'+realD+'</td>'+
-      '</tr>';
+    return '<tr style="'+(isCurr?'background:#fdf8ec;font-weight:600':'')+'">'
+      +'<td style="padding:5px 10px;border-bottom:1px solid #f0ece4;font-size:11px">'+mk.icon+' '+mk.label+(isCurr?' ◀':'')+'</td>'
+      +'<td style="padding:5px 10px;border-bottom:1px solid #f0ece4;font-family:monospace;text-align:center;font-size:11px">'+estD+'</td>'
+      +'<td style="padding:5px 10px;border-bottom:1px solid #f0ece4;font-family:monospace;text-align:center;font-size:11px;color:'+(realD!=='—'?'#22a05b':'#ccc')+'">'+realD+'</td>'
+      +'</tr>';
   }).join('');
 
-  // ── SVG TIMELINE (larger, more prominent) ──
-  var svgW=700, mL=40, mR=40, bW=svgW-mL-mR;
-  var bY=60, bH=20; // bigger bar
+  // ── SVG TIMELINE ──
+  var svgW=700,mL=40,mR=40,bW=svgW-mL-mR,bY=38,bH=20;
   var span=Math.max(1,pDaysBetween(tl.confirmacion,tl.entrega_final));
   function sx(d){return mL+Math.max(0,Math.min(1,pDaysBetween(tl.confirmacion,d)/span))*bW;}
 
-  // Phase segments with labels
   var phases2=[
-    {s:'confirmacion',  e:prod.req_muestra?'ini_muestra':'ini_produccion', c:'#f5e09a', label:'Mockup'},
-    {s:prod.req_muestra?'ini_muestra':'ini_produccion', e:'ini_produccion', c:'#e8d07a', label:prod.req_muestra?'Muestra':''},
-    {s:'ini_produccion', e:'embarque',      c:'#ddb443', label:'Producción'},
-    {s:'embarque',       e:'llegada_aduana', c:'#b8941e', label:'Tránsito'},
-    {s:'llegada_aduana', e:'entrega_final',  c:'#8a6e10', label:'Internación'}
+    {s:'confirmacion', e:prod.req_muestra?(tl['ini_muestra_1']?'ini_muestra_1':'ini_muestra'):'ini_produccion', c:'#f5e09a', label:'Mockup'},
+    {s:prod.req_muestra?(tl['ini_muestra_1']?'ini_muestra_1':'ini_muestra'):'ini_produccion', e:'ini_produccion', c:'#e8d07a', label:prod.req_muestra?'Muestra':''},
+    {s:'ini_produccion', e:'embarque', c:'#ddb443', label:'Producción'},
+    {s:'embarque', e:'llegada_aduana', c:'#b8941e', label:'Tránsito'},
+    {s:'llegada_aduana', e:'entrega_final', c:'#8a6e10', label:'Internación'}
   ];
 
-  var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+svgW+'" height="160">';
-  // Background rail
+  var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+svgW+'" height="110">';
   svg+='<rect x="'+mL+'" y="'+bY+'" width="'+bW+'" height="'+bH+'" fill="#f0ede6" rx="10"/>';
-  // Phase segments
+
   phases2.forEach(function(ph){
     var s=tl[ph.s],e=tl[ph.e]; if(!s||!e) return;
     var x=sx(s),w=Math.max(2,sx(e)-sx(s));
     svg+='<rect x="'+x+'" y="'+bY+'" width="'+w+'" height="'+bH+'" fill="'+ph.c+'" rx="4"/>';
-    if(ph.label&&w>40){
-      svg+='<text x="'+(x+w/2)+'" y="'+(bY+bH/2+4)+'" text-anchor="middle" font-size="9" font-family="DM Sans,sans-serif" fill="rgba(0,0,0,.5)" font-weight="600">'+ph.label+'</text>';
+    if(ph.label&&w>40) svg+='<text x="'+(x+w/2)+'" y="'+(bY+bH/2+4)+'" text-anchor="middle" font-size="9" font-family="DM Sans,sans-serif" fill="rgba(0,0,0,.5)" font-weight="600">'+ph.label+'</text>';
+  });
+
+  // CNY zones
+  CNY.forEach(function(p){
+    var cs=pDate(p.s),ce=pDate(p.e); if(!cs||!ce) return;
+    var cx=sx(cs),cw=Math.max(0,sx(ce)-sx(cs));
+    if(cx<mL+bW&&cx+cw>mL){
+      var rx=Math.max(mL,cx), rw=Math.min(cw,mL+bW-rx);
+      svg+='<rect x="'+rx+'" y="'+(bY-8)+'" width="'+rw+'" height="'+(bH+16)+'" fill="rgba(255,140,0,.12)" rx="3"/>';
+      svg+='<text x="'+(rx+4)+'" y="'+(bY-2)+'" font-size="7" fill="#c07000" font-family="DM Sans,sans-serif" font-weight="700">CNY 🧧</text>';
     }
   });
 
-  // Milestone dots + labels (alternating above/below)
-  milestones.forEach(function(mk,i){
-    var d=tl[mk.key]; if(!d) return;
-    var x=sx(d);
+  // Milestone: icons above bar, dots on bar, est+real dates below — fixed rows, no overlap
+  var pdfPts=pdfMs.map(function(mk,i){
+    var d=tl[mk.key]; if(!d) return null;
+    return {mk:mk,i:i,x:sx(d),d:d};
+  }).filter(Boolean);
+
+  var iconY=bY-24, estY=bY+bH+16, realY=bY+bH+30;
+
+  pdfPts.forEach(function(pt){
+    var mk=pt.mk,x=pt.x;
     var isCurr=mk.key===prod.current_stage;
-    var realSet=!!prod.milestones_real[mk.key];
-    // Dot
-    svg+='<circle cx="'+x+'" cy="'+(bY+bH/2)+'" r="'+(isCurr?9:6)+'" fill="'+(realSet?'#22a05b':isCurr?'#ddb443':'#fff')+'" stroke="'+(realSet?'#197a46':isCurr?'#b8941e':'#aaa')+'" stroke-width="2"/>';
-    if(isCurr){
-      svg+='<circle cx="'+x+'" cy="'+(bY+bH/2)+'" r="14" fill="none" stroke="#ddb443" stroke-width="1.5" stroke-dasharray="3,2" opacity=".6"/>';
-    }
-    // Label alternating
-    var above=i%2===0;
-    var labelY=above ? bY-22 : bY+bH+28;
-    var dateY=above ? bY-10 : bY+bH+40;
-    // Tick line
-    svg+='<line x1="'+x+'" y1="'+(above?bY-4:bY+bH)+'" x2="'+x+'" y2="'+(above?bY-18:bY+bH+16)+'" stroke="#ccc" stroke-width="1"/>';
-    svg+='<text x="'+x+'" y="'+labelY+'" text-anchor="middle" font-size="9" font-family="DM Sans,sans-serif" fill="'+(isCurr?'#b8941e':realSet?'#197a46':'#666')+'" font-weight="'+(isCurr?'700':'400')+'">'+mk.label+'</text>';
-    svg+='<text x="'+x+'" y="'+dateY+'" text-anchor="middle" font-size="8" font-family="monospace" fill="'+(realSet?'#197a46':'#999')+'">'+d.toLocaleDateString('es-CL',{day:'2-digit',month:'2-digit'})+'</text>';
+    var realD=prod.milestones_real[mk.key]?pDate(prod.milestones_real[mk.key]):null;
+    var fill=realD?'#22a05b':isCurr?'#ddb443':'#fff';
+    var stroke=realD?'#197a46':isCurr?'#b8941e':'#aaa';
+    svg+='<text x="'+x+'" y="'+iconY+'" text-anchor="middle" font-size="13">'+mk.icon+'</text>';
+    svg+='<line x1="'+x+'" y1="'+(bY-10)+'" x2="'+x+'" y2="'+bY+'" stroke="#ddd" stroke-width="1"/>';
+    svg+='<circle cx="'+x+'" cy="'+(bY+bH/2)+'" r="'+(isCurr?8:5)+'" fill="'+fill+'" stroke="'+stroke+'" stroke-width="2"/>';
+    if(isCurr) svg+='<circle cx="'+x+'" cy="'+(bY+bH/2)+'" r="12" fill="none" stroke="#ddb443" stroke-width="1.5" stroke-dasharray="3,2" opacity=".5"/>';
+    svg+='<line x1="'+x+'" y1="'+(bY+bH)+'" x2="'+x+'" y2="'+(bY+bH+10)+'" stroke="#ddd" stroke-width="1"/>';
+    svg+='<text x="'+x+'" y="'+estY+'" text-anchor="middle" font-size="8" font-family="monospace" fill="'+(isCurr?'#b8941e':'#999')+'">'+pt.d.toLocaleDateString('es-CL',{day:'2-digit',month:'2-digit'})+'</text>';
+    if(realD) svg+='<text x="'+x+'" y="'+realY+'" text-anchor="middle" font-size="8" font-family="monospace" fill="#22a05b" font-weight="600">&#10003;'+realD.toLocaleDateString('es-CL',{day:'2-digit',month:'2-digit'})+'</text>';
   });
 
-  // TODAY marker
   var tx=sx(today);
   if(tx>mL&&tx<mL+bW){
-    svg+='<line x1="'+tx+'" y1="'+(bY-28)+'" x2="'+tx+'" y2="'+(bY+bH+44)+'" stroke="#d94f3d" stroke-width="1.5" stroke-dasharray="4,3"/>';
-    svg+='<rect x="'+(tx-14)+'" y="'+(bY-42)+'" width="28" height="14" rx="4" fill="#d94f3d"/>';
-    svg+='<text x="'+tx+'" y="'+(bY-32)+'" text-anchor="middle" font-size="8" fill="#fff" font-weight="700">HOY</text>';
+    svg+='<line x1="'+tx+'" y1="'+(bY-10)+'" x2="'+tx+'" y2="'+(bY+bH+10)+'" stroke="#d94f3d" stroke-width="1.5" stroke-dasharray="4,3"/>';
+    svg+='<rect x="'+(tx-14)+'" y="'+(bY-24)+'" width="28" height="13" rx="3" fill="#d94f3d"/>';
+    svg+='<text x="'+tx+'" y="'+(bY-14)+'" text-anchor="middle" font-size="7" fill="#fff" font-weight="700">HOY</text>';
   }
   svg+='</svg>';
 
-  // ── LOGO SVG inline ──
-  var logoSVG='<svg viewBox="0 0 485.64 160.86" height="36" xmlns="http://www.w3.org/2000/svg">'+SVG_STR+'</svg>';
+  var msRefRows=pdfPts.map(function(pt){
+    var mk=pt.mk;
+    var estD=tl[mk.key]?pCL(tl[mk.key]):'—';
+    var realD=prod.milestones_real[mk.key]?pCL(pDate(prod.milestones_real[mk.key])):'—';
+    var isCurr=mk.key===prod.current_stage;
+    return '<tr style="'+(isCurr?'background:#fdf8ec;font-weight:600':'')+'">'+
+      '<td style="padding:4px 10px;border-bottom:1px solid #f0ece4;font-size:10px">'+mk.icon+' '+mk.label+(isCurr?' ◀':'')+'</td>'+
+      '<td style="padding:4px 10px;border-bottom:1px solid #f0ece4;font-family:monospace;text-align:center;font-size:10px">'+estD+'</td>'+
+      '<td style="padding:4px 10px;border-bottom:1px solid #f0ece4;font-family:monospace;text-align:center;font-size:10px;color:'+(realD!=='—'?'#22a05b':'#ccc')+'">'+realD+'</td>'+
+      '</tr>';
+  }).join('');
 
-  var html='<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">'+
-    '<title>Estado Pedido — '+o.cliente+'</title>'+
+  var logoSVG='<svg viewBox="0 0 485.64 160.86" height="36" xmlns="http://www.w3.org/2000/svg">'+SVG_STR+'</svg>';
+  var showTotalD=prod.pdf_show_totalD!==false; // default true
+
+  var html='<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">'
+    +'<title>Estado Pedido — '+o.cliente+'</title>'
+    +'<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">'
+    +'<style>body{font-family:"DM Sans",sans-serif;color:#1a1a1a;padding:36px 44px;max-width:820px;margin:0 auto}@media print{body{padding:24px 32px}}table{width:100%;border-collapse:collapse}</style>'
+    +'</head><body>'
+    // Header
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">'
+      +logoSVG
+      +'<div style="text-align:right;font-size:11px;color:#888">'
+        +'<div style="font-family:monospace">'+o.nv+(o.oc_cliente?' &nbsp;·&nbsp; OC: '+o.oc_cliente:'')+'</div>'
+        +'<div style="margin-top:3px">'+today.toLocaleDateString('es-CL',{day:'2-digit',month:'long',year:'numeric'})+'</div>'
+      +'</div>'
+    +'</div>'
+    +'<div style="height:3px;background:linear-gradient(90deg,#ddb443,#f5e09a,#ddb443);border-radius:2px;margin-bottom:20px"></div>'
+    // Order info
+    +'<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px">'
+      +'<div>'
+        +'<div style="font-size:24px;font-weight:700;letter-spacing:-.3px">'+o.cliente+'</div>'
+        +'<div style="font-size:14px;color:#444;margin-top:4px;font-weight:500">'+prod.descripcion+'</div>'
+        +'<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'
+          +'<span style="background:'+(prod.mode==='air'?'#e8f0fb':'#e8f5ef')+';color:'+(prod.mode==='air'?'#2a62b0':'#22a05b')+';padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600">'+(prod.mode==='air'?'✈ Aéreo':'🚢 Marítimo')+'</span>'
+          +(prod.tipoTiempo?'<span style="background:#f5f5f3;color:#555;padding:3px 10px;border-radius:20px;font-size:11px">'+prod.tipoTiempo+'</span>':'')
+          +(showTotalD?'<span style="background:#fdf8ec;color:#b8941e;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600">~'+totalD+' días</span>':'')
+        +'</div>'
+        +(prod.notes?'<div style="margin-top:10px;font-size:11px;color:#555;padding:8px 12px;background:#f9f7f3;border-radius:6px;border-left:3px solid #ddb443;line-height:1.6">'+prod.notes+'</div>':'')
+      +'</div>'
+      +(o.total?'<div style="text-align:right"><div style="font-size:28px;font-weight:700;color:#b8941e;font-family:monospace;letter-spacing:-1px">'+clp(o.total)+'</div><div style="font-size:11px;color:#888;margin-top:3px">Total orden</div></div>':'')
+    +'</div>'
+    // Timeline
+    +'<div style="background:#fdf8ec;border-radius:10px;padding:20px 10px 16px;margin-bottom:24px">'
+      +'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#b8941e;margin-bottom:12px;margin-left:40px">Línea de Tiempo</div>'
+      +svg
+    +'</div>'
+    // Milestone table
+    +'<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#999;margin-bottom:8px">Detalle de Hitos</div>'
+    +'<table><thead><tr style="background:#f9f7f3">'
+      +'<th style="padding:5px 10px;text-align:left;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Hito</th>'
+      +'<th style="padding:5px 10px;text-align:center;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Estimado</th>'
+      +'<th style="padding:5px 10px;text-align:center;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Real</th>'
+    +'</tr></thead><tbody>'+msRefRows+'</tbody></table>'
+    // Disclaimer
+    +'<div style="margin-top:28px;padding:10px 14px;border-left:3px solid #ddb443;background:#fdf8ec;border-radius:0 6px 6px 0">'
+      +'<div style="font-size:10px;color:#b8941e;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">Aviso importante</div>'
+      +'<div style="font-size:10px;color:#888;line-height:1.7">Todos los plazos son <strong>estimados</strong> y pueden verse afectados por la situación geopolítica mundial, contingencias logísticas, disponibilidad de materiales y condiciones aduaneras. Cada hito debe ser confirmado por nuestro equipo. Este documento no constituye un compromiso contractual de fechas definitivas.</div>'
+    +'</div>'
+    +'</body></html>';
+
+  var w=window.open('','_blank');
+  if(!w){ toast('⚠ Popup bloqueado — permite popups para este sitio'); return; }
+  w.document.write(html); w.document.close();
+  setTimeout(function(){w.print();},800);
+}
+
+// ── ANGELA PDF (Supplier / China) ──
+function pedGenerateAngelaPDF(o, prod, tl, milestones){
+  if(!tl){toast('Sin timeline');return;}
+  var today=new Date();
+
+  // Only show milestones up to embarque
+  var stopKeys=['confirmacion','envio_aw','vb_mockup','ini_muestra','ini_muestra_1','ini_muestra_2','ini_muestra_3','apr_muestra','apr_muestra_1','apr_muestra_2','apr_muestra_3','envio_arte_def','ini_produccion','embarque'];
+  var angMs=milestones.filter(function(m){ return stopKeys.indexOf(m.key)>=0; });
+
+  // SVG timeline
+  var svgW=680, mL=40, mR=40, bW=svgW-mL-mR, bY=50, bH=18;
+  var span=Math.max(1,pDaysBetween(tl.confirmacion,tl.embarque||tl.entrega_final));
+  function sx(d){ return mL+Math.max(0,Math.min(1,pDaysBetween(tl.confirmacion,d)/span))*bW; }
+
+  var phases=[
+    {s:'confirmacion', e:prod.req_muestra?'ini_muestra_1':'ini_produccion', c:'#f5e09a', label:'Artwork'},
+    {s:prod.req_muestra?'ini_muestra_1':'ini_produccion', e:'ini_produccion', c:'#e8d07a', label:prod.req_muestra?'Sample':''},
+    {s:'ini_produccion', e:'embarque', c:'#ddb443', label:'Production'}
+  ];
+
+  var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+svgW+'" height="110">';
+  svg+='<rect x="'+mL+'" y="'+bY+'" width="'+bW+'" height="'+bH+'" fill="#f0ede6" rx="8"/>';
+  phases.forEach(function(ph){
+    var s=tl[ph.s],e=tl[ph.e]; if(!s||!e) return;
+    var x=sx(s),w=Math.max(2,sx(e)-sx(s));
+    svg+='<rect x="'+x+'" y="'+bY+'" width="'+w+'" height="'+bH+'" fill="'+ph.c+'" rx="4"/>';
+    if(ph.label&&w>40) svg+='<text x="'+(x+w/2)+'" y="'+(bY+bH/2+4)+'" text-anchor="middle" font-size="9" font-family="Arial,sans-serif" fill="rgba(0,0,0,.5)" font-weight="600">'+ph.label+'</text>';
+  });
+  // CNY zones
+  CNY.forEach(function(p){
+    var cs=pDate(p.s),ce=pDate(p.e); if(!cs||!ce) return;
+    var cx=sx(cs),cw=Math.max(0,sx(ce)-sx(cs));
+    if(cx<mL+bW&&cx+cw>mL){
+      var rx=Math.max(mL,cx),rw=Math.min(cw,mL+bW-rx);
+      svg+='<rect x="'+rx+'" y="'+(bY-6)+'" width="'+rw+'" height="'+(bH+12)+'" fill="rgba(255,140,0,.13)" rx="2"/>';
+      svg+='<text x="'+(rx+3)+'" y="'+(bY-1)+'" font-size="7" fill="#c07000" font-family="Arial,sans-serif" font-weight="700">CNY closure</text>';
+    }
+  });
+  // Today
+  var tx=sx(today);
+  if(tx>mL&&tx<mL+bW){
+    svg+='<line x1="'+tx+'" y1="'+(bY-10)+'" x2="'+tx+'" y2="'+(bY+bH+10)+'" stroke="#d94f3d" stroke-width="1.5" stroke-dasharray="4,3"/>';
+    svg+='<rect x="'+(tx-14)+'" y="'+(bY-24)+'" width="28" height="13" rx="3" fill="#d94f3d"/>';
+    svg+='<text x="'+tx+'" y="'+(bY-14)+'" text-anchor="middle" font-size="7" fill="#fff" font-weight="700">TODAY</text>';
+  }
+  // Milestone dots + icons + dates
+  var iconY=bY-22, estY=bY+bH+14, realY=bY+bH+27;
+  angMs.forEach(function(mk){
+    var d=tl[mk.key]; if(!d) return;
+    var x=sx(d);
+    var isCurr=mk.key===prod.current_stage;
+    var realD=prod.milestones_real[mk.key]?pDate(prod.milestones_real[mk.key]):null;
+    var fill=realD?'#22a05b':isCurr?'#ddb443':'#fff';
+    var stroke=realD?'#197a46':isCurr?'#b8941e':'#aaa';
+    svg+='<text x="'+x+'" y="'+iconY+'" text-anchor="middle" font-size="12">'+mk.icon+'</text>';
+    svg+='<line x1="'+x+'" y1="'+(bY-8)+'" x2="'+x+'" y2="'+bY+'" stroke="#ddd" stroke-width="1"/>';
+    svg+='<circle cx="'+x+'" cy="'+(bY+bH/2)+'" r="'+(isCurr?7:5)+'" fill="'+fill+'" stroke="'+stroke+'" stroke-width="2"/>';
+    svg+='<line x1="'+x+'" y1="'+(bY+bH)+'" x2="'+x+'" y2="'+(bY+bH+8)+'" stroke="#ddd" stroke-width="1"/>';
+    svg+='<text x="'+x+'" y="'+estY+'" text-anchor="middle" font-size="8" font-family="monospace" fill="'+(isCurr?'#b8941e':'#888')+'">'+d.toLocaleDateString('en-GB',{day:'2-digit',month:'2-digit'})+'</text>';
+    if(realD) svg+='<text x="'+x+'" y="'+realY+'" text-anchor="middle" font-size="8" font-family="monospace" fill="#22a05b" font-weight="600">&#10003;'+realD.toLocaleDateString('en-GB',{day:'2-digit',month:'2-digit'})+'</text>';
+  });
+  svg+='</svg>';
+
+  // Milestone table (English)
+  var LABEL_EN={'confirmacion':'Confirmation','envio_aw':'Artwork Sent','vb_mockup':'Mockup Approval','ini_muestra':'Sample Start','ini_muestra_1':'Sample Start','ini_muestra_2':'Sample Start (M2)','ini_muestra_3':'Sample Start (M3)','apr_muestra':'Sample Approval','apr_muestra_1':'Sample Approval','apr_muestra_2':'Sample Approval (M2)','apr_muestra_3':'Sample Approval (M3)','envio_arte_def':'Final Artwork Sent','ini_produccion':'Production Start','embarque':'Shipment Ready'};
+  var msRows=angMs.map(function(mk){
+    var d=tl[mk.key]; if(!d) return '';
+    var estD=d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+    var realD=prod.milestones_real[mk.key]?pDate(prod.milestones_real[mk.key]).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}):'—';
+    var isCurr=mk.key===prod.current_stage;
+    var label=LABEL_EN[mk.key]||mk.label;
+    return '<tr style="'+(isCurr?'background:#fdf8ec;font-weight:600':'')+'">'+
+      '<td style="padding:5px 12px;border-bottom:1px solid #f0ece4;font-size:11px">'+mk.icon+' '+label+'</td>'+
+      '<td style="padding:5px 12px;border-bottom:1px solid #f0ece4;font-family:monospace;text-align:center;font-size:11px">'+estD+'</td>'+
+      '<td style="padding:5px 12px;border-bottom:1px solid #f0ece4;font-family:monospace;text-align:center;font-size:11px;color:'+(realD!=='—'?'#22a05b':'#ccc')+'">'+realD+'</td>'+
+      '</tr>';
+  }).join('');
+
+  var logoSVG='<svg viewBox="0 0 485.64 160.86" height="32" xmlns="http://www.w3.org/2000/svg">'+SVG_STR+'</svg>';
+  var prodTitle=prod.nombre||prod.descripcion||'Product';
+  var _sd=prod.dias_muestra||(times[prod.tipoTiempo]||{}).sample_days||'—';
+  var _bd=prod.dias_produccion||(times[prod.tipoTiempo]||{}).bulk_days||'—';
+
+  var html='<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">'+
+    '<title>Production Schedule — '+o.cliente+'</title>'+
     '<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">'+
-    '<style>'+
-      'body{font-family:"DM Sans",sans-serif;color:#1a1a1a;padding:36px 44px;max-width:820px;margin:0 auto}'+
-      '@media print{body{padding:24px 32px}}'+
-      'table{width:100%;border-collapse:collapse}'+
-    '</style>'+
+    '<style>body{font-family:"DM Sans",Arial,sans-serif;color:#1a1a1a;padding:36px 44px;max-width:820px;margin:0 auto}@media print{body{padding:24px 32px}}table{width:100%;border-collapse:collapse}</style>'+
     '</head><body>'+
 
-    // ── HEADER with logo ──
-    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">'+
+    // Header
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">'+
       logoSVG+
       '<div style="text-align:right;font-size:11px;color:#888">'+
-        '<div style="font-family:monospace">'+o.nv+(o.oc_cliente?' &nbsp;·&nbsp; OC: '+o.oc_cliente:'')+'</div>'+
-        '<div style="margin-top:3px">'+today.toLocaleDateString('es-CL',{day:'2-digit',month:'long',year:'numeric'})+'</div>'+
+        '<div style="font-family:monospace;font-weight:600">PRODUCTION SCHEDULE</div>'+
+        '<div style="margin-top:2px">'+today.toLocaleDateString('en-GB',{day:'2-digit',month:'long',year:'numeric'})+'</div>'+
       '</div>'+
     '</div>'+
+    '<div style="height:3px;background:linear-gradient(90deg,#ddb443,#f5e09a,#ddb443);border-radius:2px;margin-bottom:18px"></div>'+
 
-    // ── GOLD DIVIDER ──
-    '<div style="height:3px;background:linear-gradient(90deg,#ddb443,#f5e09a,#ddb443);border-radius:2px;margin-bottom:20px"></div>'+
-
-    // ── ORDER INFO ──
-    '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px">'+
+    // Order + product info
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px">'+
       '<div>'+
-        '<div style="font-size:24px;font-weight:700;letter-spacing:-.3px">'+o.cliente+'</div>'+
-        '<div style="font-size:14px;color:#444;margin-top:4px;font-weight:500">'+prod.descripcion+'</div>'+
+        '<div style="font-size:22px;font-weight:700">'+o.cliente+'</div>'+
+        '<div style="font-size:14px;color:#444;margin-top:3px;font-weight:500">'+prodTitle+'</div>'+
+        '<div style="font-size:11px;font-family:monospace;color:#888;margin-top:4px">'+
+          (prod.sku?'SKU: '+prod.sku+'&nbsp;&nbsp;':'')+(prod.pi_num?'<b style="color:#7a4800">PI#: '+prod.pi_num+'</b>':'')+'&nbsp;&nbsp;'+o.nv+
+        '</div>'+
         '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">'+
-          '<span style="background:'+(prod.mode==='air'?'#e8f0fb':'#e8f5ef')+';color:'+(prod.mode==='air'?'#2a62b0':'#22a05b')+';padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600">'+(prod.mode==='air'?'✈ Aéreo':'🚢 Marítimo')+'</span>'+
-          (prod.tipoTiempo?'<span style="background:#f5f5f3;color:#555;padding:3px 10px;border-radius:20px;font-size:11px">'+prod.tipoTiempo+'</span>':'')+
-          '<span style="background:#fdf8ec;color:#b8941e;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600">~'+totalD+' días</span>'+
+          '<span style="background:'+(prod.mode==='air'?'#e8f0fb':'#e8f5ef')+';color:'+(prod.mode==='air'?'#2a62b0':'#22a05b')+';padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600">'+(prod.mode==='air'?'✈ Air Freight':'🚢 Sea Freight')+'</span>'+
+          '<span style="background:#f5f5f3;color:#555;padding:3px 10px;border-radius:20px;font-size:11px">Qty: <b>'+prod.cantidad+'</b></span>'+
+          '<span style="background:#fdf8ec;color:#b8941e;padding:3px 10px;border-radius:20px;font-size:11px">Sample: <b>'+_sd+'d</b> &nbsp; Production: <b>'+_bd+'d</b></span>'+
         '</div>'+
       '</div>'+
-      (o.total?'<div style="text-align:right"><div style="font-size:28px;font-weight:700;color:#b8941e;font-family:monospace;letter-spacing:-1px">'+clp(o.total)+'</div><div style="font-size:11px;color:#888;margin-top:3px">Total orden</div></div>':'')+
+      '<div style="text-align:right;font-size:11px;color:#888">'+
+        '<div>Confirmation: <b>'+o.conf_date+'</b></div>'+
+        (tl.embarque?'<div style="margin-top:3px">Target Shipment: <b style="color:#b8941e">'+pCL(tl.embarque)+'</b></div>':'')+
+        (prod.crd?'<div style="margin-top:3px;color:#22a05b;font-weight:600">CRD: '+pCL(pDate(prod.crd))+'</div>':'')+
+      '</div>'+
     '</div>'+
 
-    // ── TIMELINE (prominent) ──
-    '<div style="background:#fdf8ec;border-radius:10px;padding:20px 10px 16px;margin-bottom:24px">'+
-      '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#b8941e;margin-bottom:12px;margin-left:40px">Línea de Tiempo</div>'+
+    // Timeline
+    '<div style="background:#fdf8ec;border-radius:10px;padding:18px 10px 14px;margin-bottom:20px">'+
+      '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#b8941e;margin-bottom:10px;margin-left:40px">Production Timeline</div>'+
       svg+
     '</div>'+
 
-    // ── MILESTONE TABLE (compact) ──
-    '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#999;margin-bottom:8px">Detalle de Hitos</div>'+
+    // Milestone table
+    '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#999;margin-bottom:6px">Key Milestones</div>'+
     '<table><thead><tr style="background:#f9f7f3">'+
-      '<th style="padding:5px 10px;text-align:left;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Hito</th>'+
-      '<th style="padding:5px 10px;text-align:center;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Estimado</th>'+
-      '<th style="padding:5px 10px;text-align:center;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Real</th>'+
+      '<th style="padding:5px 12px;text-align:left;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Milestone</th>'+
+      '<th style="padding:5px 12px;text-align:center;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Estimated</th>'+
+      '<th style="padding:5px 12px;text-align:center;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700;text-transform:uppercase">Actual</th>'+
     '</tr></thead><tbody>'+msRows+'</tbody></table>'+
 
-    // ── DISCLAIMER ──
-    '<div style="margin-top:28px;padding:10px 14px;border-left:3px solid #ddb443;background:#fdf8ec;border-radius:0 6px 6px 0">'+
-      '<div style="font-size:10px;color:#b8941e;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:3px">Aviso importante</div>'+
-      '<div style="font-size:10px;color:#888;line-height:1.7">Todos los plazos son <strong>estimados</strong> y pueden verse afectados por la situación geopolítica mundial, contingencias logísticas, disponibilidad de materiales y condiciones aduaneras. Cada hito debe ser confirmado por nuestro equipo. Este documento no constituye un compromiso contractual de fechas definitivas.</div>'+
+    // Notes
+    (prod.notes?'<div style="margin-top:16px;padding:10px 14px;border-left:3px solid #ddb443;background:#fdf8ec;border-radius:0 6px 6px 0">'+
+      '<div style="font-size:10px;color:#b8941e;font-weight:700;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Notes</div>'+
+      '<div style="font-size:11px;color:#555;line-height:1.7">'+prod.notes+'</div>'+
+    '</div>':'')+
+
+    // Disclaimer
+    '<div style="margin-top:20px;padding:10px 14px;border-left:3px solid #e5e3de;background:#fafafa;border-radius:0 6px 6px 0">'+
+      '<div style="font-size:10px;color:#aaa;line-height:1.7">All dates are estimated and subject to change. Please confirm any date adjustments with Novapromo in advance. This document is for internal coordination purposes only.</div>'+
     '</div>'+
 
     '</body></html>';
 
-  var w=window.open('','_blank'); w.document.write(html); w.document.close();
+  var w=window.open('','_blank');
+  if(!w){toast('⚠ Popup bloqueado — permite popups para este sitio');return;}
+  w.document.write(html); w.document.close();
   setTimeout(function(){w.print();},800);
 }
+
+// ── MULTI-PRODUCT PDF ──
+function pedGenerateMultiPDF(oid){
+  var o=pedOrders[oid]; if(!o||!o.productos||!o.productos.length){toast('Sin productos');return;}
+  var today=new Date();
+  var logoSVG='<svg viewBox="0 0 485.64 160.86" height="34" xmlns="http://www.w3.org/2000/svg">'+SVG_STR+'</svg>';
+
+  var pages='';
+  o.productos.forEach(function(prod,pidx){
+    var tl=pedCalcTL(prod,o.conf_date); if(!tl) return;
+    var milestones=pedMilestones(prod);
+    var pdfMs=prod.pdf_milestones&&prod.pdf_milestones.length
+      ? milestones.filter(function(m){return prod.pdf_milestones.indexOf(m.key)>=0;})
+      : milestones;
+    var totalD=pDaysBetween(tl.confirmacion,tl.entrega_final);
+    var prodTitle=prod.nombre||prod.descripcion||'Producto '+(pidx+1);
+    var showTotalD=prod.pdf_show_totalD!==false;
+
+    // Build SVG
+    var svgW=660,mL=36,mR=36,bW=svgW-mL-mR,bY=50,bH=18;
+    var span=Math.max(1,pDaysBetween(tl.confirmacion,tl.entrega_final));
+    function sx(d){return mL+Math.max(0,Math.min(1,pDaysBetween(tl.confirmacion,d)/span))*bW;}
+    var phases=[
+      {s:'confirmacion',e:prod.req_muestra?(tl['ini_muestra_1']?'ini_muestra_1':'ini_muestra'):'ini_produccion',c:'#f5e09a',label:'Mockup'},
+      {s:prod.req_muestra?(tl['ini_muestra_1']?'ini_muestra_1':'ini_muestra'):'ini_produccion',e:'ini_produccion',c:'#e8d07a',label:prod.req_muestra?'Sample':''},
+      {s:'ini_produccion',e:'embarque',c:'#ddb443',label:'Producción'},
+      {s:'embarque',e:'llegada_aduana',c:'#b8941e',label:'Tránsito'},
+      {s:'llegada_aduana',e:'entrega_final',c:'#8a6e10',label:'Internación'}
+    ];
+    var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+svgW+'" height="108">';
+    svg+='<rect x="'+mL+'" y="'+bY+'" width="'+bW+'" height="'+bH+'" fill="#f0ede6" rx="8"/>';
+    phases.forEach(function(ph){
+      var s=tl[ph.s],e=tl[ph.e];if(!s||!e)return;
+      var x=sx(s),w=Math.max(2,sx(e)-sx(s));
+      svg+='<rect x="'+x+'" y="'+bY+'" width="'+w+'" height="'+bH+'" fill="'+ph.c+'" rx="4"/>';
+      if(ph.label&&w>40)svg+='<text x="'+(x+w/2)+'" y="'+(bY+bH/2+4)+'" text-anchor="middle" font-size="9" font-family="DM Sans,sans-serif" fill="rgba(0,0,0,.45)" font-weight="600">'+ph.label+'</text>';
+    });
+    CNY.forEach(function(p){
+      var cs=pDate(p.s),ce=pDate(p.e);if(!cs||!ce)return;
+      var cx=sx(cs),cw=Math.max(0,sx(ce)-sx(cs));
+      if(cx<mL+bW&&cx+cw>mL){var rx=Math.max(mL,cx),rw=Math.min(cw,mL+bW-rx);svg+='<rect x="'+rx+'" y="'+(bY-6)+'" width="'+rw+'" height="'+(bH+12)+'" fill="rgba(255,140,0,.13)" rx="2"/><text x="'+(rx+3)+'" y="'+(bY-1)+'" font-size="7" fill="#c07000" font-family="DM Sans,sans-serif" font-weight="700">CNY 🧧</text>';}
+    });
+    var tx=sx(today);
+    if(tx>mL&&tx<mL+bW){svg+='<line x1="'+tx+'" y1="'+(bY-8)+'" x2="'+tx+'" y2="'+(bY+bH+8)+'" stroke="#d94f3d" stroke-width="1.5" stroke-dasharray="4,3"/><rect x="'+(tx-13)+'" y="'+(bY-22)+'" width="26" height="12" rx="3" fill="#d94f3d"/><text x="'+tx+'" y="'+(bY-13)+'" text-anchor="middle" font-size="7" fill="#fff" font-weight="700">HOY</text>';}
+    var iconY=bY-22,estY=bY+bH+14,realY=bY+bH+27;
+    pdfMs.forEach(function(mk){
+      var d=tl[mk.key];if(!d)return;
+      var x=sx(d),isCurr=mk.key===prod.current_stage;
+      var realD=prod.milestones_real[mk.key]?pDate(prod.milestones_real[mk.key]):null;
+      var fill=realD?'#22a05b':isCurr?'#ddb443':'#fff',stroke=realD?'#197a46':isCurr?'#b8941e':'#aaa';
+      svg+='<text x="'+x+'" y="'+iconY+'" text-anchor="middle" font-size="12">'+mk.icon+'</text>';
+      svg+='<line x1="'+x+'" y1="'+(bY-8)+'" x2="'+x+'" y2="'+bY+'" stroke="#ddd" stroke-width="1"/>';
+      svg+='<circle cx="'+x+'" cy="'+(bY+bH/2)+'" r="'+(isCurr?7:5)+'" fill="'+fill+'" stroke="'+stroke+'" stroke-width="2"/>';
+      svg+='<line x1="'+x+'" y1="'+(bY+bH)+'" x2="'+x+'" y2="'+(bY+bH+8)+'" stroke="#ddd" stroke-width="1"/>';
+      svg+='<text x="'+x+'" y="'+estY+'" text-anchor="middle" font-size="7" font-family="monospace" fill="'+(isCurr?'#b8941e':'#999')+'">'+d.toLocaleDateString('es-CL',{day:'2-digit',month:'2-digit'})+'</text>';
+      if(realD)svg+='<text x="'+x+'" y="'+realY+'" text-anchor="middle" font-size="7" font-family="monospace" fill="#22a05b" font-weight="600">&#10003;'+realD.toLocaleDateString('es-CL',{day:'2-digit',month:'2-digit'})+'</text>';
+    });
+    svg+='</svg>';
+
+    // Milestone table rows
+    var msRows=pdfMs.map(function(mk){
+      var estD=tl[mk.key]?pCL(tl[mk.key]):'—';
+      var realD=prod.milestones_real[mk.key]?pCL(pDate(prod.milestones_real[mk.key])):'—';
+      var isCurr=mk.key===prod.current_stage;
+      return '<tr style="'+(isCurr?'background:#fdf8ec;font-weight:600':'')+'">'+
+        '<td style="padding:4px 10px;border-bottom:1px solid #f0ece4;font-size:10px">'+mk.icon+' '+mk.label+'</td>'+
+        '<td style="padding:4px 10px;border-bottom:1px solid #f0ece4;font-family:monospace;text-align:center;font-size:10px">'+estD+'</td>'+
+        '<td style="padding:4px 10px;border-bottom:1px solid #f0ece4;font-family:monospace;text-align:center;font-size:10px;color:'+(realD!=='—'?'#22a05b':'#ccc')+'">'+realD+'</td>'+
+        '</tr>';
+    }).join('');
+
+    pages+='<div style="page-break-after:always;padding:32px 40px;max-width:820px;margin:0 auto;box-sizing:border-box">'+
+      // Header
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">'+
+        logoSVG+
+        '<div style="text-align:right;font-size:11px;color:#888">'+
+          '<div style="font-family:monospace">'+o.nv+(o.oc_cliente?' &nbsp;·&nbsp; OC: '+o.oc_cliente:'')+'</div>'+
+          '<div>'+today.toLocaleDateString('es-CL',{day:'2-digit',month:'long',year:'numeric'})+'</div>'+
+          '<div style="font-size:10px;margin-top:2px;color:#bbb">'+(pidx+1)+' / '+o.productos.length+'</div>'+
+        '</div>'+
+      '</div>'+
+      '<div style="height:3px;background:linear-gradient(90deg,#ddb443,#f5e09a,#ddb443);border-radius:2px;margin-bottom:16px"></div>'+
+      // Product info
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px">'+
+        '<div>'+
+          '<div style="font-size:22px;font-weight:700;letter-spacing:-.3px">'+o.cliente+'</div>'+
+          '<div style="font-size:15px;color:#444;margin-top:3px;font-weight:600">'+prodTitle+'</div>'+
+          (prod.sku||prod.promo?'<div style="font-size:11px;font-family:monospace;color:#888;margin-top:2px">'+(prod.sku?'SKU: '+prod.sku+' &nbsp; ':'')+( prod.promo?'PROMO: '+prod.promo:'')+'</div>':'')+
+          '<div style="margin-top:8px;display:flex;gap:7px;flex-wrap:wrap">'+
+            '<span style="background:'+(prod.mode==='air'?'#e8f0fb':'#e8f5ef')+';color:'+(prod.mode==='air'?'#2a62b0':'#22a05b')+';padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600">'+(prod.mode==='air'?'✈ Aéreo':'🚢 Marítimo')+'</span>'+
+            '<span style="background:#f5f5f3;color:#555;padding:2px 9px;border-radius:20px;font-size:11px">'+prod.cantidad+' uds.</span>'+
+            (showTotalD?'<span style="background:#fdf8ec;color:#b8941e;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600">~'+totalD+' días</span>':'')+
+          '</div>'+
+          (prod.notes?'<div style="margin-top:10px;font-size:11px;color:#555;padding:7px 10px;background:#f9f7f3;border-radius:6px;border-left:3px solid #ddb443;line-height:1.6">'+prod.notes+'</div>':'')+
+        '</div>'+
+        (prod.precio_unitario?'<div style="text-align:right"><div style="font-size:22px;font-weight:700;color:#b8941e;font-family:monospace">'+clp(prod.cantidad*prod.precio_unitario)+'</div><div style="font-size:11px;color:#888;margin-top:2px">'+prod.cantidad+' × '+clp(prod.precio_unitario)+'</div></div>':'')+
+      '</div>'+
+      // Timeline
+      '<div style="background:#fdf8ec;border-radius:10px;padding:16px 8px 12px;margin-bottom:18px">'+
+        '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#b8941e;margin-bottom:8px;margin-left:36px">Línea de Tiempo</div>'+
+        svg+
+      '</div>'+
+      // Table
+      '<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#999;margin-bottom:6px">Detalle de Hitos</div>'+
+      '<table style="width:100%;border-collapse:collapse"><thead><tr style="background:#f9f7f3">'+
+        '<th style="padding:4px 10px;text-align:left;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700">Hito</th>'+
+        '<th style="padding:4px 10px;text-align:center;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700">Estimado</th>'+
+        '<th style="padding:4px 10px;text-align:center;border-bottom:2px solid #ddb443;font-size:10px;color:#888;font-weight:700">Real</th>'+
+      '</tr></thead><tbody>'+msRows+'</tbody></table>'+
+      // Disclaimer
+      '<div style="margin-top:20px;padding:9px 12px;border-left:3px solid #ddb443;background:#fdf8ec;border-radius:0 6px 6px 0">'+
+        '<div style="font-size:9px;color:#888;line-height:1.7">Todos los plazos son <strong>estimados</strong>. Fechas sujetas a cambio por factores logísticos, geopolíticos o de producción. Este documento no constituye compromiso contractual de fechas definitivas.</div>'+
+      '</div>'+
+    '</div>';
+  });
+
+  var html='<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8">'+
+    '<title>Estado Pedido — '+o.cliente+'</title>'+
+    '<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">'+
+    '<style>body{font-family:"DM Sans",sans-serif;color:#1a1a1a;padding:0;margin:0}table{width:100%;border-collapse:collapse}@media print{.page{page-break-after:always}}</style>'+
+    '</head><body>'+pages+'</body></html>';
+
+  var w=window.open('','_blank');
+  if(!w){toast('⚠ Popup bloqueado — permite popups');return;}
+  w.document.write(html); w.document.close();
+  setTimeout(function(){w.print();},800);
+}
+window.pedGenerateMultiPDF=pedGenerateMultiPDF;
 
 // ── PROYECTADO ──
 function proyRender(inclArchived){
@@ -3868,6 +4506,7 @@ document.querySelector('[data-tab="proy"]').addEventListener('click',function(){
   }
 });
 window.pedOpenNewModal=pedOpenNewModal;
+window.pedOpenEditModal=pedOpenEditModal;
 window.pedCloseModal=pedCloseModal;
 window.pedSaveOrder=pedSaveOrder;
 window.pedAddProdRow=pedAddProdRow;
@@ -3893,7 +4532,7 @@ window.pedDeleteOrder=pedDeleteOrder;
         </div>
         <div style="display:flex;flex-direction:column;gap:3px">
           <label style="font-size:11px;font-weight:700;color:var(--tx-d)">PROMO — N° interno</label>
-          <input type="text" id="pm-promo" placeholder="Ej: PROMO-456" style="padding:7px 10px;border:1.5px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:13px;outline:none">
+          <div style="padding:7px 10px;border:1px solid #eee;border-radius:var(--r);font-size:11px;color:#aaa;background:#fafafa">Se ingresa por producto ↓</div>
         </div>
         <div style="display:flex;flex-direction:column;gap:3px">
           <label style="font-size:11px;font-weight:700;color:var(--tx-d)">OC Cliente (referencia)</label>
@@ -3910,24 +4549,10 @@ window.pedDeleteOrder=pedDeleteOrder;
           <input type="date" id="pm-fecha" style="padding:7px 10px;border:1.5px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:13px;outline:none">
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px">
+      <div style="display:grid;grid-template-columns:1fr;gap:10px">
         <div style="display:flex;flex-direction:column;gap:3px">
-          <label style="font-size:11px;font-weight:700;color:var(--tx-d)">💳 Condición de pago</label>
-          <select id="pm-pago-cond" style="padding:7px 10px;border:1.5px solid #ddd;border-radius:var(--r);font-family:var(--f);font-size:12px;outline:none">
-            <option value="">— Sin especificar —</option>
-            <option value="anticipo_muestra">Anticipo para iniciar muestras</option>
-            <option value="anticipo_produccion">Anticipo para iniciar producción</option>
-            <option value="pago_embarque">Pago completo antes del embarque</option>
-            <option value="30_70">30% anticipo / 70% antes embarque</option>
-            <option value="50_50">50% anticipo / 50% antes embarque</option>
-            <option value="100_anticipado">100% anticipado</option>
-            <option value="credito_30">Crédito 30 días</option>
-            <option value="otro">Otro (ver notas)</option>
-          </select>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:3px">
-          <label style="font-size:11px;font-weight:700;color:var(--tx-d)">Fecha de pago</label>
-          <input type="date" id="pm-pago-fecha" style="padding:7px 10px;border:1.5px solid #ddd;border-radius:var(--r);font-family:var(--m);font-size:13px;outline:none">
+          <label style="font-size:11px;font-weight:700;color:var(--tx-d)">Condiciones de pago al cliente</label>
+          <div style="padding:7px 10px;border:1px solid #e5e3de;border-radius:var(--r);font-size:12px;color:var(--tx-d);background:var(--bg)">30 días (estándar)</div>
         </div>
       </div>
       <div>
